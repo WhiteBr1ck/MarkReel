@@ -12,3 +12,7 @@ Thumbs.db
 
 .local/
 data/
+
+.agents/
+.claude/
+local/minio/
