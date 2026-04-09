@@ -1,0 +1,242 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum ProjectRole {
+  owner
+  editor
+  viewer
+}
+
+enum MediaProcessingStatus {
+  uploaded
+  queued
+  processing
+  ready
+  failed
+}
+
+enum ReviewStatus {
+  open
+  needs_changes
+  approved
+}
+
+enum AnnotationType {
+  pin
+  rect
+  text
+}
+
+enum SharePermission {
+  view
+  comment
+  annotate
+}
+
+enum AttachmentKind {
+  image
+}
+
+enum QuotaScopeType {
+  user
+  project
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  displayName  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  deletedAt    DateTime?
+
+  memberships ProjectMember[]
+  projects    Project[]        @relation("ProjectOwner")
+  annotations Annotation[]
+  auditLogs   AuditLog[]
+  shareLinks  ShareLink[]
+}
+
+model Project {
+  id        String   @id @default(cuid())
+  name      String
+  ownerId   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  owner       User            @relation("ProjectOwner", fields: [ownerId], references: [id])
+  members     ProjectMember[]
+  folders     ProjectFolder[]
+  media       Media[]
+  shareLinks  ShareLink[]
+  series      MediaSeries[]
+  annotations Annotation[]
+}
+
+model ProjectFolder {
+  id        String   @id @default(cuid())
+  projectId String
+  parentId  String?
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  project   Project        @relation(fields: [projectId], references: [id])
+  parent    ProjectFolder? @relation("ProjectFolderChildren", fields: [parentId], references: [id])
+  children  ProjectFolder[] @relation("ProjectFolderChildren")
+  media     Media[]
+}
+
+model MediaSeries {
+  id        String   @id @default(cuid())
+  projectId String
+  title     String
+  createdAt DateTime @default(now())
+  deletedAt DateTime?
+
+  project Project @relation(fields: [projectId], references: [id])
+  media    Media[]
+}
+
+model ProjectMember {
+  projectId String
+  userId    String
+  role      ProjectRole
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@id([projectId, userId])
+}
+
+model Media {
+  id           String                @id @default(cuid())
+  projectId    String
+  folderId     String?
+  title        String
+  seriesId     String?
+  versionIndex Int                   @default(1)
+  status       MediaProcessingStatus @default(uploaded)
+  reviewStatus ReviewStatus          @default(open)
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+  deletedAt    DateTime?
+
+  project     Project        @relation(fields: [projectId], references: [id])
+  folder      ProjectFolder? @relation(fields: [folderId], references: [id])
+  series      MediaSeries?   @relation(fields: [seriesId], references: [id])
+  files       MediaFile[]
+  annotations Annotation[]
+  shareLinks  ShareLink[]
+}
+
+model MediaFile {
+  id                String   @id @default(cuid())
+  mediaId           String
+  originalObjectKey String
+  derivedPrefix     String?
+  mode              String   // original|compress (MVP)
+  durationMs        Int?
+  width             Int?
+  height            Int?
+  sizeBytes         Int?
+  bitrateKbps       Int?
+  frameCount        Int?
+  createdAt         DateTime @default(now())
+
+  media Media @relation(fields: [mediaId], references: [id])
+
+  @@unique([mediaId, originalObjectKey])
+}
+
+model Annotation {
+  id          String         @id @default(cuid())
+  projectId   String
+  mediaId     String
+  authorId    String
+  timestampMs Int
+  type        AnnotationType
+  rect        Json?
+  body        String
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  deletedAt   DateTime?
+
+  project     Project      @relation(fields: [projectId], references: [id])
+  media       Media        @relation(fields: [mediaId], references: [id])
+  author      User         @relation(fields: [authorId], references: [id])
+  attachments Attachment[]
+}
+
+model Attachment {
+  id          String         @id @default(cuid())
+  annotationId String
+  kind        AttachmentKind
+  objectKey   String
+  mimeType    String?
+  width       Int?
+  height      Int?
+  createdAt   DateTime       @default(now())
+
+  annotation Annotation @relation(fields: [annotationId], references: [id])
+}
+
+model ShareLink {
+  id          String                @id @default(cuid())
+  tokenHash   String                @unique
+  projectId   String?
+  mediaId     String?
+  createdById String?
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime              @default(now())
+
+  project     Project?              @relation(fields: [projectId], references: [id])
+  media       Media?                @relation(fields: [mediaId], references: [id])
+  createdBy   User?                 @relation(fields: [createdById], references: [id])
+  permissions ShareLinkPermission[]
+}
+
+model ShareLinkPermission {
+  id          String          @id @default(cuid())
+  shareLinkId String
+  permission  SharePermission
+
+  shareLink ShareLink @relation(fields: [shareLinkId], references: [id], onDelete: Cascade)
+
+  @@unique([shareLinkId, permission])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorUserId String?
+  action    String
+  entityType String
+  entityId  String
+  meta      Json?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  actorUser User? @relation(fields: [actorUserId], references: [id])
+}
+
+model Quota {
+  id         String         @id @default(cuid())
+  scopeType  QuotaScopeType
+  scopeId    String
+  maxBytes   BigInt
+  usedBytes  BigInt @default(0)
+  updatedAt  DateTime @updatedAt
+
+  @@unique([scopeType, scopeId])
+}

@@ -1,0 +1,31 @@
+{
+  "name": "markreel",
+  "version": "0.1.1",
+  "description": "Open-source self-hosted video review and annotation tool.",
+  "private": true,
+  "packageManager": "npm@10.9.3",
+  "scripts": {
+    "dev": "docker compose up --build",
+    "dev:debug": "powershell -ExecutionPolicy Bypass -File scripts/dev.ps1",
+    "dev:debug:skip-deps": "powershell -ExecutionPolicy Bypass -File scripts/dev.ps1 -SkipDeps",
+    "dev:debug:unix": "bash scripts/dev.sh",
+    "dev:local": "powershell -ExecutionPolicy Bypass -File scripts/dev-local.ps1",
+    "dev:local:portable-pg": "powershell -ExecutionPolicy Bypass -File scripts/dev-local.ps1 -UsePortablePostgres",
+    "dev:up": "powershell -ExecutionPolicy Bypass -File scripts/dev-up.ps1",
+    "dev:local:unix": "bash scripts/dev-local.sh",
+    "up": "docker compose up -d --build",
+    "down": "docker compose down",
+    "logs": "docker compose logs -f --tail=200",
+    "test": "npm -ws test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "AGPL-3.0-only",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
