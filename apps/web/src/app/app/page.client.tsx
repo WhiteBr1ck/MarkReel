@@ -211,7 +211,9 @@ type DialogState =
   | { type: "create_project"; value: string }
   | { type: "rename_project"; value: string; projectId: string }
   | { type: "create_folder"; value: string }
-  | { type: "rename_item"; value: string; targetId: string; targetKind: WorkspaceItem["kind"] };
+  | { type: "rename_item"; value: string; targetId: string; targetKind: WorkspaceItem["kind"] }
+  | { type: "confirm_delete_project"; projectId: string; projectName: string }
+  | { type: "confirm_clear_trash"; projectId: string; projectName: string };
 
 export default function AppClient() {
   const [mode, setMode] = useState<"login" | "register">("login");
@@ -634,6 +636,7 @@ export default function AppClient() {
       const nextProjectId = refreshed.projects[0]?.id ?? null;
       setActiveWorkspaceId(nextProjectId);
       setContextMenu(null);
+      setDialog(null);
       if (!nextProjectId) {
         setWorkspace(null);
         setTrashItems([]);
@@ -733,6 +736,14 @@ export default function AppClient() {
 
   function openRenameForItem(item: WorkspaceItem) {
     setDialog({ type: "rename_item", value: item.name, targetId: item.id, targetKind: item.kind });
+  }
+
+  function openDeleteProjectDialog(projectId: string, projectName: string) {
+    setDialog({ type: "confirm_delete_project", projectId, projectName });
+  }
+
+  function openClearTrashDialog(projectId: string, projectName: string) {
+    setDialog({ type: "confirm_clear_trash", projectId, projectName });
   }
 
   function updateUpload(id: string, patch: Partial<UploadItem>) {
@@ -910,6 +921,7 @@ export default function AppClient() {
       showFeedback("success", data.deleted > 0 ? `已彻底删除 ${data.deleted} 个回收站视频` : "回收站已经是空的");
       await Promise.all([refreshTrash(effectivePid), refreshWorkspace(effectivePid, effectiveFid)]);
       setContextMenu(null);
+      setDialog(null);
     } catch (e: any) {
       const message = toZhError(e);
       setErr(message);
@@ -960,7 +972,7 @@ export default function AppClient() {
       }
 
       if (action === "delete") {
-        void onDeleteProject(target.id, target.name);
+        openDeleteProjectDialog(target.id, target.name);
       }
       return;
     }
@@ -1110,7 +1122,9 @@ export default function AppClient() {
   const renameDisabled = !workspace || !selectionMode || "error" in renameState;
   const renameHint = renameDisabled ? ("error" in renameState ? renameState.error : "请先进入多选模式") : "重命名当前选中条目";
   const currentProject = workspaces.find((project) => project.id === effectivePid) ?? workspace?.project ?? null;
-  const projectOwnerLabel = currentProject?.ownerId === user?.id ? "我" : currentProject?.ownerId ?? "未知";
+  const projectOwnerLabel = currentProject?.ownerId === user?.id
+    ? (user?.displayName?.trim() || user?.username || "未知")
+    : currentProject?.ownerId ?? "未知";
   const projectViewSizeBytes = visibleItems.reduce((sum, item) => sum + (item.kind === "video" ? item.sizeBytes ?? 0 : 0), 0);
 
   return (
@@ -1190,6 +1204,74 @@ export default function AppClient() {
           void onRenameSelected(name, dialog.targetId, dialog.targetKind);
         }}
       />
+
+      <Dialog
+        open={dialog?.type === "confirm_delete_project"}
+        title="删除项目？"
+        description={dialog?.type === "confirm_delete_project" ? `项目“${dialog.projectName}”会被移除，相关工作台内容也会一起删除。此操作不可撤销。` : undefined}
+        onClose={() => {
+          if (busy) return;
+          setDialog(null);
+        }}
+        footer={
+          <>
+            <button type="button" className="mr-btn mr-btn--ghost" onClick={() => setDialog(null)} disabled={busy}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="mr-btn mr-btn--danger"
+              onClick={() => {
+                if (dialog?.type !== "confirm_delete_project") return;
+                void onDeleteProject(dialog.projectId, dialog.projectName);
+              }}
+              disabled={busy}
+            >
+              {busy ? "删除中…" : "确认删除"}
+            </button>
+          </>
+        }
+      >
+        <div className="mr-dialog__stack">
+          <div className="mr-dialog__note mr-dialog__note--danger">
+            继续后将删除该项目及其当前工作区内容。请先确认这里不是仍在协作中的项目。
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={dialog?.type === "confirm_clear_trash"}
+        title="清空回收站？"
+        description={dialog?.type === "confirm_clear_trash" ? `项目“${dialog.projectName}”回收站里的视频会被永久删除，无法恢复。` : undefined}
+        onClose={() => {
+          if (busy) return;
+          setDialog(null);
+        }}
+        footer={
+          <>
+            <button type="button" className="mr-btn mr-btn--ghost" onClick={() => setDialog(null)} disabled={busy}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="mr-btn mr-btn--danger"
+              onClick={() => {
+                if (dialog?.type !== "confirm_clear_trash") return;
+                void onClearTrash();
+              }}
+              disabled={busy}
+            >
+              {busy ? "清空中…" : "确认清空"}
+            </button>
+          </>
+        }
+      >
+        <div className="mr-dialog__stack">
+          <div className="mr-dialog__note mr-dialog__note--danger">
+            该操作会永久移除回收站中的所有视频，仅建议在确认不再需要恢复时执行。
+          </div>
+        </div>
+      </Dialog>
 
       <Dialog
         open={overlay === "settings"}
@@ -1516,13 +1598,18 @@ export default function AppClient() {
                 </div>
 
                 <div style={{ marginTop: 14, display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                  <div className="mr-toolbar-group" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <div className="mr-toolbar-group">
                     {scope === "trash" ? (
                       <>
                         <button className="mr-btn" type="button" onClick={() => setQuery({ scope: null, sel: null, q: null })}>
                           返回项目
                         </button>
-                        <button className="mr-btn mr-btn--danger" type="button" onClick={() => void onClearTrash()} disabled={trashItems.length === 0 || busy}>
+                        <button
+                          className="mr-btn mr-btn--danger"
+                          type="button"
+                          onClick={() => currentProject && openClearTrashDialog(currentProject.id, currentProject.name)}
+                          disabled={trashItems.length === 0 || busy}
+                        >
                           全部删除
                         </button>
                       </>
@@ -1540,7 +1627,7 @@ export default function AppClient() {
                       </>
                     )}
                   </div>
-                  <div className="mr-toolbar-group" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <div className="mr-toolbar-group">
                     {scope === "workspace" ? (
                       <>
                         <button className="mr-btn" type="button" onClick={() => {
@@ -1562,7 +1649,7 @@ export default function AppClient() {
                       </>
                     ) : null}
                   </div>
-                  <div className="mr-toolbar-group" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <div className="mr-toolbar-group">
                     <div style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid var(--border2)", borderRadius: 999, padding: "8px 12px", background: "var(--surface-1)", minWidth: 260 }}>
                       <IconSearch size={16} />
                       <input
@@ -1672,23 +1759,10 @@ export default function AppClient() {
                         <button
                           key={it.id}
                           type="button"
-                          className="mr-panel mr-item-row"
+                          className={`mr-panel mr-item-row${selected ? " mr-item-row--selected" : ""}`}
                           onContextMenu={(event) => openContextMenu(event, it)}
                           onClick={() => {
                             void handleItemClick(it);
-                          }}
-                          style={{
-                            padding: 10,
-                            boxShadow: "none",
-                            background: selected ? "rgba(46,196,182,0.08)" : "rgba(255,255,255,0.02)",
-                            border: `1px solid ${selected ? "rgba(46,196,182,0.35)" : "var(--border2)"}`,
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 10,
-                            width: "100%",
-                            color: "var(--text)",
-                            textAlign: "left",
-                            cursor: "pointer"
                           }}
                         >
                           {scope === "workspace" && selectionMode ? (
@@ -1730,7 +1804,7 @@ export default function AppClient() {
                               setContextMenu({ x: Math.max(12, rect.right - 180), y: Math.max(12, rect.bottom + 8), target: it });
                             }}
                           >
-                            •••
+                            <span aria-hidden="true">⋯</span>
                           </button>
                         </button>
                       );
@@ -1746,39 +1820,14 @@ export default function AppClient() {
                         <button
                           key={it.id}
                           type="button"
-                          className="mr-panel mr-card-button"
+                          className={`mr-panel mr-card-button${selected ? " mr-card-button--selected" : ""}`}
                           onContextMenu={(event) => openContextMenu(event, it)}
                           onClick={() => {
                             void handleItemClick(it);
                           }}
-                          style={{
-                            padding: 12,
-                            boxShadow: "none",
-                            background: selected ? "rgba(46,196,182,0.08)" : "rgba(255,255,255,0.03)",
-                            border: `1px solid ${selected ? "rgba(46,196,182,0.35)" : "var(--border2)"}`,
-                            width: "100%",
-                            color: "var(--text)",
-                            textAlign: "left",
-                            cursor: "pointer",
-                            position: "relative",
-                            overflow: "visible"
-                          }}
                         >
                           <div
-                            style={{
-                              height: 120,
-                              borderRadius: 12,
-                              overflow: "hidden",
-                              background:
-                                it.kind === "folder"
-                                  ? "linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02))"
-                                  : "linear-gradient(135deg, rgba(46,196,182,0.16), rgba(255,209,102,0.10)), radial-gradient(400px 120px at 20% 30%, rgba(255,255,255,0.10), transparent 60%)",
-                              border: "1px solid var(--border2)",
-                              display: "grid",
-                              placeItems: "center",
-                              color: "var(--muted)",
-                              position: "relative"
-                            }}
+                            className={`mr-card-button__preview${it.kind === "folder" ? " mr-card-button__preview--folder" : " mr-card-button__preview--video"}`}
                           >
                             {it.kind === "folder" ? <IconFolder size={22} /> : <VideoCardPreview name={it.name} previewUrl={previewUrls[it.id]} />}
                             {scope === "workspace" && selectionMode ? (
@@ -1792,45 +1841,14 @@ export default function AppClient() {
                                 />
                               </span>
                             ) : null}
-                            <button
-                              type="button"
-                              className="mr-item-action mr-item-action--overlay"
-                              aria-label={`条目菜单：${it.name}`}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                const rect = event.currentTarget.getBoundingClientRect();
-                                setContextMenu({ x: Math.max(12, rect.right - 180), y: Math.max(12, rect.bottom + 8), target: it });
-                              }}
-                              style={{
-                                position: "absolute",
-                                right: 10,
-                                bottom: 10,
-                                zIndex: 3
-                              }}
-                            >
-                              •••
-                            </button>
                           </div>
 
-                          <div style={{ marginTop: 10, display: "flex", alignItems: "flex-start", gap: 8, minWidth: 0 }}>
-                            <div style={{ flex: 1, minWidth: 0 }} title={it.name}>
-                              <div
-                                style={{
-                                  fontWeight: 850,
-                                  display: "-webkit-box",
-                                  WebkitLineClamp: 2,
-                                  WebkitBoxOrient: "vertical",
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "normal",
-                                  wordBreak: "break-word",
-                                  lineHeight: 1.45,
-                                  minHeight: "calc(1.45em * 2)"
-                                }}
-                              >
+                          <div className="mr-card-button__body">
+                            <div className="mr-card-button__content" title={it.name}>
+                              <div className="mr-card-button__title">
                                 {it.name}
                               </div>
-                              <div style={{ marginTop: 6, opacity: 0.7, fontSize: 12, lineHeight: 1.5 }}>
+                              <div className="mr-card-button__meta">
                                 {it.kind === "video" ? (
                                   <>
                                     <div>{formatBytes(it.sizeBytes)} · {formatDuration(it.durationSeconds)}</div>
@@ -1841,6 +1859,18 @@ export default function AppClient() {
                                 ) : "文件夹"}
                               </div>
                             </div>
+                            <button
+                              type="button"
+                              className="mr-item-action mr-item-action--overlay mr-card-button__menu"
+                              aria-label={`条目菜单：${it.name}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                const rect = event.currentTarget.getBoundingClientRect();
+                                setContextMenu({ x: Math.max(12, rect.right - 180), y: Math.max(12, rect.bottom + 8), target: it });
+                              }}
+                            >
+                              <span aria-hidden="true">⋯</span>
+                            </button>
                           </div>
                         </button>
                       );
@@ -1931,11 +1961,17 @@ export default function AppClient() {
           }
           right={
             <div style={{ display: "grid", gap: 10 }}>
-              <div className="mr-panel" style={{ padding: 12, boxShadow: "none" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <div className={`mr-inspector-panel${inspectorOpen ? "" : " mr-inspector-panel--collapsed"}`}>
+                <div className="mr-inspector-panel__head">
                   <div style={{ fontSize: 12, opacity: 0.7 }}>项目信息</div>
-                  <button className="mr-btn" type="button" onClick={() => setQuery({ inspector: inspectorOpen ? "0" : "1" })}>
-                    {inspectorOpen ? "隐藏信息" : "显示信息"}
+                  <button
+                    className="mr-btn mr-btn--surface mr-inspector-toggle"
+                    type="button"
+                    title={inspectorOpen ? "收起项目信息" : "展开项目信息"}
+                    aria-label={inspectorOpen ? "收起项目信息" : "展开项目信息"}
+                    onClick={() => setQuery({ inspector: inspectorOpen ? "0" : "1" })}
+                  >
+                    <span aria-hidden="true">ⓘ</span>
                   </button>
                 </div>
                 {inspectorOpen ? (
@@ -1976,7 +2012,7 @@ export default function AppClient() {
                     <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 13, lineHeight: 1.6 }}>选择一个项目后，这里会显示项目级信息。</div>
                   )
                 ) : (
-                  <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 13, lineHeight: 1.6 }}>已收起项目信息面板，点击右上角即可展开。</div>
+                  <div className="mr-inspector-panel__collapsed-note">点击图标查看项目信息</div>
                 )}
               </div>
 

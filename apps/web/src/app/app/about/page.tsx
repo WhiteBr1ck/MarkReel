@@ -3,30 +3,68 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+function sanitizeWorkbenchHref(value: string | null): string {
+  if (!value) return "/app";
+  try {
+    const url = new URL(value, "http://localhost");
+    if (url.pathname !== "/app") return "/app";
+    return `${url.pathname}${url.search}${url.hash}` || "/app";
+  } catch {
+    return "/app";
+  }
+}
+
+const principles = [
+  {
+    title: "项目优先",
+    copy: "先围绕项目建立工作语境，再管理文件夹、视频、上传进度和回收站，减少信息散落。"
+  },
+  {
+    title: "自托管可控",
+    copy: "让部署节奏、存储边界和账号管理保留在自己的环境里，而不是被第三方流程牵着走。"
+  },
+  {
+    title: "审阅路径收敛",
+    copy: "上传、预览、逐帧查看和反馈尽量停留在同一条工作路径上，降低上下文切换。"
+  }
+];
+
 export default function AboutPage() {
   const [backHref, setBackHref] = useState<string>("/app");
 
   useEffect(() => {
-    setBackHref(localStorage.getItem("mr_last_workbench_url") || "/app");
+    setBackHref(sanitizeWorkbenchHref(localStorage.getItem("mr_last_workbench_url")));
   }, []);
 
   return (
-    <main style={{ minHeight: "100vh", padding: 24 }}>
-      <div style={{ width: "min(980px, 100%)", margin: "0 auto" }}>
-        <div className="mr-panel" style={{ padding: 18 }}>
-          <div style={{ opacity: 0.75, fontSize: 13 }}>关于</div>
-          <h1 style={{ margin: "6px 0 0", fontSize: 26, letterSpacing: -0.4 }}>MarkReel</h1>
-          <p style={{ margin: "10px 0 0", opacity: 0.85, lineHeight: 1.6 }}>
-            MarkReel 是一个开源、自托管的视频审阅与标注工具。当前本地开发默认使用 SQLite 持久化数据，并持续打磨工作台上传、预览与批注体验。
-          </p>
-          <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <Link href="/" prefetch={false} className="mr-btn" style={{ textDecoration: "none", display: "inline-block" }}>
-              返回首页
-            </Link>
-            <Link href={backHref} prefetch={false} className="mr-btn" style={{ textDecoration: "none", display: "inline-block" }}>
-              返回工作台
-            </Link>
+    <main className="mr-page">
+      <div className="mr-page__shell">
+        <section className="mr-panel mr-page__hero">
+          <div className="mr-page__hero-head">
+            <div>
+              <div className="mr-page__eyebrow">About</div>
+              <h1 className="mr-page__title">MarkReel</h1>
+              <p className="mr-page__lead">一个开源、自托管的视频审阅与标注工具，持续围绕上传、预览、逐帧查看和批注主路径打磨体验。</p>
+            </div>
+            <div className="mr-page__actions">
+              <Link href="/" prefetch={false} className="mr-btn mr-page__link">
+                返回首页
+              </Link>
+              <Link href={backHref} prefetch={false} className="mr-btn mr-page__link">
+                返回工作台
+              </Link>
+            </div>
           </div>
+        </section>
+
+        <div className="mr-page__grid">
+          {principles.map((item) => (
+            <section key={item.title} className="mr-panel mr-page__card">
+              <div className="mr-page__section-kicker">Principle</div>
+              <h2 className="mr-page__section-title">{item.title}</h2>
+              <p className="mr-page__note">{item.copy}</p>
+            </section>
+          ))}
         </div>
       </div>
     </main>

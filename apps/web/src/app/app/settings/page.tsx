@@ -5,6 +5,17 @@ import { useEffect, useState } from "react";
 
 type ApiUser = { id: string; username: string; displayName: string | null };
 
+function sanitizeWorkbenchHref(value: string | null): string {
+  if (!value) return "/app";
+  try {
+    const url = new URL(value, "http://localhost");
+    if (url.pathname !== "/app") return "/app";
+    return `${url.pathname}${url.search}${url.hash}` || "/app";
+  } catch {
+    return "/app";
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     ...init,
@@ -30,7 +41,7 @@ export default function SettingsPage() {
     setTheme(t);
     document.documentElement.dataset.theme = t;
 
-    setBackHref(localStorage.getItem("mr_last_workbench_url") || "/app");
+    setBackHref(sanitizeWorkbenchHref(localStorage.getItem("mr_last_workbench_url")));
   }, []);
 
   useEffect(() => {
@@ -46,56 +57,57 @@ export default function SettingsPage() {
   }
 
   return (
-    <main style={{ minHeight: "100vh", padding: 24 }}>
-      <div style={{ width: "min(980px, 100%)", margin: "0 auto" }}>
-        <div className="mr-panel" style={{ padding: 18 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
+    <main className="mr-page">
+      <div className="mr-page__shell">
+        <section className="mr-panel mr-page__hero">
+          <div className="mr-page__hero-head">
             <div>
-              <div style={{ opacity: 0.75, fontSize: 13 }}>设置</div>
-              <h1 style={{ margin: "6px 0 0", fontSize: 26, letterSpacing: -0.4 }}>用户与外观</h1>
+              <div className="mr-page__eyebrow">Settings</div>
+              <h1 className="mr-page__title">用户与界面偏好</h1>
+              <p className="mr-page__lead">统一管理当前账号信息、主题外观和返回工作台的入口，不打断已有工作流。</p>
             </div>
-            <Link href={backHref} prefetch={false} className="mr-btn" style={{ textDecoration: "none", display: "inline-block" }}>
+            <Link href={backHref} prefetch={false} className="mr-btn mr-page__link">
               返回工作台
             </Link>
           </div>
+        </section>
 
-          <div
-            style={{
-              marginTop: 16,
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-              gap: 12
-            }}
-          >
-            <section className="mr-panel" style={{ padding: 14, boxShadow: "none" }}>
-              <div style={{ fontWeight: 700 }}>当前用户</div>
-              <div style={{ marginTop: 8, opacity: 0.85, lineHeight: 1.5 }}>
-                {user ? (
-                  <>
-                    <div>用户名：{user.username}</div>
-                    <div>昵称：{user.displayName ?? "(未设置)"}</div>
-                    <div style={{ opacity: 0.7, fontSize: 12, marginTop: 6 }}>
-                      当前为本地 SQLite 持久化模式，账号与项目会保存在项目本地数据库中。
-                    </div>
-                  </>
-                ) : (
-                  <div>未登录</div>
-                )}
-              </div>
-            </section>
+        <div className="mr-page__grid">
+          <section className="mr-panel mr-page__card">
+            <div className="mr-page__section-kicker">Account</div>
+            <h2 className="mr-page__section-title">当前用户</h2>
+            <div className="mr-page__meta-list">
+              {user ? (
+                <>
+                  <div className="mr-page__meta-item">
+                    <span>用户名</span>
+                    <strong>{user.username}</strong>
+                  </div>
+                  <div className="mr-page__meta-item">
+                    <span>昵称</span>
+                    <strong>{user.displayName ?? "(未设置)"}</strong>
+                  </div>
+                  <p className="mr-page__note">当前为本地 SQLite 持久化模式，账号与项目会保存在项目本地数据库中。</p>
+                </>
+              ) : (
+                <p className="mr-page__note">当前还没有可用的登录信息。</p>
+              )}
+            </div>
+          </section>
 
-            <section className="mr-panel" style={{ padding: 14, boxShadow: "none" }}>
-              <div style={{ fontWeight: 700 }}>主题</div>
-              <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <button className="mr-btn" onClick={() => setThemeAndPersist("dark")} disabled={theme === "dark"}>
-                  深色
-                </button>
-                <button className="mr-btn" onClick={() => setThemeAndPersist("light")} disabled={theme === "light"}>
-                  浅色
-                </button>
-              </div>
-            </section>
-          </div>
+          <section className="mr-panel mr-page__card">
+            <div className="mr-page__section-kicker">Appearance</div>
+            <h2 className="mr-page__section-title">主题模式</h2>
+            <p className="mr-page__note">界面会立即应用选择结果，并写入本地偏好，后续回到工作台时继续沿用。</p>
+            <div className="mr-page__actions">
+              <button className={`mr-btn mr-btn--surface${theme === "dark" ? " mr-btn--primary" : ""}`} onClick={() => setThemeAndPersist("dark")} disabled={theme === "dark"}>
+                深色
+              </button>
+              <button className={`mr-btn mr-btn--surface${theme === "light" ? " mr-btn--primary" : ""}`} onClick={() => setThemeAndPersist("light")} disabled={theme === "light"}>
+                浅色
+              </button>
+            </div>
+          </section>
         </div>
       </div>
     </main>
