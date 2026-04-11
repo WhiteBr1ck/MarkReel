@@ -52,7 +52,7 @@ export default function HomePage() {
                 <Link className="mr-btn mr-btn--primary" href="/app">
                   进入工作台
                 </Link>
-                <Link className="mr-btn mr-btn--surface" href="/login">
+                <Link className="mr-btn mr-btn--surface" href="/app">
                   登录 / 注册
                 </Link>
               </div>

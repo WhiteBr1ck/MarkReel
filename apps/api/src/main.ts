@@ -2,11 +2,31 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
+import { ZodError } from "zod";
 import { env } from "./env";
 import { registerJwt } from "./auth/tokens";
 import { authRoutes } from "./routes/auth";
 import { projectRoutes } from "./routes/projects";
 import { ensureStorageBuckets } from "./s3";
+
+function isStorageUnavailableError(err: unknown) {
+  const error = err as {
+    name?: string;
+    code?: string;
+    message?: string;
+    cause?: { code?: string; message?: string };
+  };
+
+  return (
+    error?.code === "ECONNREFUSED" ||
+    error?.code === "ENOTFOUND" ||
+    error?.cause?.code === "ECONNREFUSED" ||
+    error?.cause?.code === "ENOTFOUND" ||
+    error?.name === "TimeoutError" ||
+    error?.message?.includes("ECONNREFUSED") ||
+    error?.message?.includes("ENOTFOUND")
+  );
+}
 
 async function bootstrap() {
   const app = Fastify({ logger: true });
@@ -16,8 +36,17 @@ async function bootstrap() {
     const name = (err as any)?.name as string | undefined;
     const msg = (err as any)?.message as string | undefined;
 
+    if (err instanceof ZodError) {
+      return reply.code(400).send({ error: "validation_error", issues: err.issues });
+    }
+
     if (name === "PrismaClientInitializationError" || msg?.includes("Can't reach database server")) {
       return reply.code(503).send({ error: "database_unavailable" });
+    }
+
+    if (isStorageUnavailableError(err)) {
+      reply.log.warn(err, "Object storage unavailable");
+      return reply.code(503).send({ error: "object_storage_unavailable" });
     }
 
     reply.log.error(err);
@@ -39,7 +68,15 @@ async function bootstrap() {
   });
 
   if (env.MARKREEL_STORE !== "inmemory") {
-    await ensureStorageBuckets();
+    try {
+      await ensureStorageBuckets();
+    } catch (err) {
+      if (isStorageUnavailableError(err)) {
+        app.log.warn(err, "Object storage unavailable during startup; continuing without bucket preflight");
+      } else {
+        throw err;
+      }
+    }
   }
 
   app.get("/health", async () => ({ ok: true }));

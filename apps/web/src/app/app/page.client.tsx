@@ -34,11 +34,46 @@ type PreviewState = {
   url: string;
 };
 
+type AnnotationAttachment = {
+  id?: string;
+  kind: "image";
+  objectKey: string;
+  mimeType?: string;
+  width?: number;
+  height?: number;
+  createdAt?: string;
+};
+
+type AnnotationRecord = {
+  id: string;
+  timestampMs: number;
+  type: "pin" | "rect" | "text";
+  body: string;
+  color?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  author?: { id: string; username: string; displayName: string | null };
+  attachments: AnnotationAttachment[];
+};
+
 type PreviewResponse = {
   preview: {
     url: string;
     fileName: string;
     inline: boolean;
+  };
+};
+
+type AnnotationListResponse = {
+  annotations: AnnotationRecord[];
+};
+
+type AttachmentPresignResponse = {
+  upload: {
+    method: "PUT";
+    url: string;
+    objectKey: string;
+    bucket: string;
   };
 };
 
@@ -228,7 +263,6 @@ export default function AppClient() {
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
-  const [preview, setPreview] = useState<PreviewState | null>(null);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [previewBusy, setPreviewBusy] = useState(false);
   const [feedback, setFeedback] = useState<FeedbackState | null>(null);
@@ -240,7 +274,13 @@ export default function AppClient() {
   const [dragProjectId, setDragProjectId] = useState<string | null>(null);
   const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
 
-  const canSubmit = useMemo(() => username.trim().length >= 3 && password.length >= 8, [username, password]);
+  const canSubmit = useMemo(() => {
+    if (mode === "login") {
+      return username.trim().length > 0 && password.length > 0;
+    }
+    return username.trim().length >= 3 && password.length >= 8;
+  }, [mode, username, password]);
+
 
   const router = useRouter();
   const pathname = usePathname();
@@ -253,7 +293,7 @@ export default function AppClient() {
   const sortRaw = sp.get("sort");
   const sort: SortMode = sortRaw === "name_asc" || sortRaw === "name_desc" ? sortRaw : "updated_desc";
   const q = sp.get("q") || "";
-  const inspectorOpen = (sp.get("inspector") ?? "1") !== "0";
+  const inspectorPaneOpen = (sp.get("panel") ?? sp.get("inspector") ?? "1") !== "0";
   const selectionMode = (sp.get("select") ?? "0") === "1";
   const scope = sp.get("scope") === "trash" ? "trash" : "workspace";
   const sel = sp.get("sel") || "";
@@ -281,6 +321,7 @@ export default function AppClient() {
 
   function setQuery(next: Record<string, string | null | undefined>) {
     const params = new URLSearchParams(sp.toString());
+    params.delete("inspector");
     for (const [k, v] of Object.entries(next)) {
       if (v === null || v === undefined || v === "") params.delete(k);
       else params.set(k, v);
@@ -567,14 +608,27 @@ export default function AppClient() {
 
   async function onAuth() {
     setErr(null);
+    const trimmedUsername = username.trim();
+    if (!trimmedUsername || !password) {
+      setErr("请输入用户名和密码");
+      return;
+    }
+    if (mode === "register" && trimmedUsername.length < 3) {
+      setErr("用户名至少需要 3 位");
+      return;
+    }
+    if (mode === "register" && password.length < 8) {
+      setErr("密码至少需要 8 位");
+      return;
+    }
     try {
       if (mode === "register") {
         await api("/auth/register", {
           method: "POST",
-          body: JSON.stringify({ username, password, displayName: displayName || undefined })
+          body: JSON.stringify({ username: trimmedUsername, password, displayName: displayName || undefined })
         });
       } else {
-        await api("/auth/login", { method: "POST", body: JSON.stringify({ username, password }) });
+        await api("/auth/login", { method: "POST", body: JSON.stringify({ username: trimmedUsername, password }) });
       }
       await refreshMe();
     } catch (e: any) {
@@ -765,9 +819,11 @@ export default function AppClient() {
     setPreviewBusy(true);
     try {
       const data = await api<PreviewResponse>(`/media/${item.id}/preview`);
-      setPreview({ id: item.id, title: item.name, url: data.preview.url });
       setUploads((prev) => prev.map((upload) => (upload.mediaId === item.id ? { ...upload, stage: "ready", progress: 100, error: undefined, actionLabel: "可预览" } : upload)));
+      localStorage.setItem("mr_last_workbench_url", `${pathname}?${sp.toString()}` || pathname);
+      router.push(`/app/player?mid=${encodeURIComponent(item.id)}`);
       showFeedback("success", `已打开 ${item.name}`);
+      setPreviewUrls((prev) => ({ ...prev, [item.id]: data.preview.url }));
     } catch (e: any) {
       const code = e?.data?.error;
       const message = code === "preview_not_ready" ? "该视频还在处理中，暂时还不能预览。" : toZhError(e);
@@ -798,9 +854,11 @@ export default function AppClient() {
     try {
       const data = await api<PreviewResponse>(`/media/${mediaId}/preview`);
       const title = uploads.find((upload) => upload.mediaId === mediaId)?.fileName ?? "预览";
-      setPreview({ id: mediaId, title, url: data.preview.url });
       setUploads((prev) => prev.map((upload) => (upload.mediaId === mediaId ? { ...upload, stage: "ready", progress: 100, error: undefined, actionLabel: "可预览" } : upload)));
+      localStorage.setItem("mr_last_workbench_url", `${pathname}?${sp.toString()}` || pathname);
+      router.push(`/app/player?mid=${encodeURIComponent(mediaId)}`);
       showFeedback("success", `已打开 ${title}`);
+      setPreviewUrls((prev) => ({ ...prev, [mediaId]: data.preview.url }));
     } catch (e: any) {
       const code = e?.data?.error;
       const message = code === "preview_not_ready" ? "该视频还在处理中，暂时还不能预览。" : toZhError(e);
@@ -809,6 +867,34 @@ export default function AppClient() {
     } finally {
       setPreviewBusy(false);
     }
+  }
+
+  async function loadAnnotations(mediaId: string) {
+    const data = await api<AnnotationListResponse>(`/media/${mediaId}/annotations`);
+    return data.annotations;
+  }
+
+  async function uploadAnnotationAttachment(file: File): Promise<AnnotationAttachment> {
+    const data = await api<AttachmentPresignResponse>("/attachments/presign", {
+      method: "POST",
+      body: JSON.stringify({ filename: file.name, contentType: file.type || "application/octet-stream" })
+    });
+    await uploadToPresignedUrl(data.upload.url, file);
+    return {
+      kind: "image",
+      objectKey: data.upload.objectKey,
+      mimeType: file.type || undefined
+    };
+  }
+
+  async function createAnnotation(
+    mediaId: string,
+    input: { timestampMs: number; type: "pin" | "text"; body: string; color: string; attachments: AnnotationAttachment[] }
+  ) {
+    await api(`/media/${mediaId}/annotations`, {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
   }
 
   async function locateUploadItem(mediaId: string) {
@@ -820,7 +906,7 @@ export default function AppClient() {
       return;
     }
 
-    setQuery({ select: "1", sel: resolved.id, inspector: "1" });
+    setQuery({ select: "1", sel: resolved.id, panel: "1" });
     showFeedback("success", `已定位 ${resolved.name}`);
   }
 
@@ -1317,29 +1403,6 @@ export default function AppClient() {
         </div>
       </Dialog>
 
-      <Dialog
-        open={!!preview}
-        title={preview?.title ?? "预览"}
-        description="预览当前视频素材。"
-        onClose={() => setPreview(null)}
-      >
-        {preview ? (
-          <div style={{ display: "grid", gap: 12 }}>
-            <video
-              key={preview.url}
-              src={preview.url}
-              controls
-              autoPlay
-              playsInline
-              style={{ width: "100%", maxHeight: "70vh", borderRadius: 16, background: "#000" }}
-            />
-            <div style={{ fontSize: 13, color: "var(--muted)" }}>
-              如果视频暂时无法播放，通常是对象存储里的文件还没准备好，或者浏览器还没拿到可用预览地址。
-            </div>
-          </div>
-        ) : null}
-      </Dialog>
-
       {!user ? (
         <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}>
           <div className="mr-panel" style={{ width: "min(980px, 100%)", padding: 16 }}>
@@ -1382,7 +1445,7 @@ export default function AppClient() {
               ) : null}
 
               <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <button className="mr-btn" type="button" disabled={!canSubmit} onClick={() => void onAuth()}>
+                <button className="mr-btn" type="button" onClick={() => void onAuth()}>
                   {mode === "login" ? "登录" : "创建账号"}
                 </button>
               </div>
@@ -1392,7 +1455,7 @@ export default function AppClient() {
       ) : (
         <AppShell
           user={user}
-          inspectorOpen={inspectorOpen}
+          inspectorOpen={inspectorPaneOpen}
           onClearUploads={() => clearUploadHistory()}
           onOpenUploadItem={(mediaId) => void openUploadItem(mediaId)}
           onLocateUploadItem={(mediaId) => void locateUploadItem(mediaId)}
@@ -1756,47 +1819,51 @@ export default function AppClient() {
                       const deletedAt = "deletedAt" in it && typeof it.deletedAt === "number" ? it.deletedAt : null;
                       const isTrashVideo = scope === "trash" && it.kind === "video";
                       return (
-                        <button
+                        <div
                           key={it.id}
-                          type="button"
                           className={`mr-panel mr-item-row${selected ? " mr-item-row--selected" : ""}`}
                           onContextMenu={(event) => openContextMenu(event, it)}
-                          onClick={() => {
-                            void handleItemClick(it);
-                          }}
                         >
-                          {scope === "workspace" && selectionMode ? (
-                            <input
-                              type="checkbox"
-                              checked={selected}
-                              onChange={() => toggleSelected(it.id)}
-                              onClick={(event) => event.stopPropagation()}
-                              aria-label="选择"
-                            />
-                          ) : null}
-
-                          <div style={{ width: 26, opacity: 0.85 }}>
-                            {it.kind === "folder" ? <IconFolder size={18} /> : <IconVideo size={18} />}
-                          </div>
-                          <div style={{ flex: 1, minWidth: 0 }} title={it.name}>
-                            <div style={{ fontWeight: 850, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</div>
-                            <div style={{ opacity: 0.65, fontSize: 12, marginTop: 4 }}>
-                              {it.kind === "video"
-                                ? `${formatDuration(it.durationSeconds)} · ${formatBytes(it.sizeBytes)} · ${formatFrames(it)} · ${formatResolution(it)} · ${formatBitrate(it)}`
-                                : "文件夹"}
-                            </div>
-                            {isTrashVideo ? (
-                              <div style={{ opacity: 0.6, fontSize: 12, marginTop: 4 }}>
-                                删除于 {deletedAt ? new Date(deletedAt).toLocaleString("zh-CN") : "-"}
-                              </div>
-                            ) : null}
-                          </div>
-                          <div style={{ width: 140, opacity: 0.65, fontSize: 12, textAlign: "right" }}>
-                            {new Date(it.updatedAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
-                          </div>
                           <button
                             type="button"
-                            className="mr-item-action"
+                            className="mr-item-row__surface"
+                            onClick={() => {
+                              void handleItemClick(it);
+                            }}
+                          >
+                            {scope === "workspace" && selectionMode ? (
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                onChange={() => toggleSelected(it.id)}
+                                onClick={(event) => event.stopPropagation()}
+                                aria-label="选择"
+                              />
+                            ) : null}
+
+                            <div style={{ width: 26, opacity: 0.85 }}>
+                              {it.kind === "folder" ? <IconFolder size={18} /> : <IconVideo size={18} />}
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }} title={it.name}>
+                              <div style={{ fontWeight: 850, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</div>
+                              <div style={{ opacity: 0.65, fontSize: 12, marginTop: 4 }}>
+                                {it.kind === "video"
+                                  ? `${formatDuration(it.durationSeconds)} · ${formatBytes(it.sizeBytes)} · ${formatFrames(it)} · ${formatResolution(it)} · ${formatBitrate(it)}`
+                                  : "文件夹"}
+                              </div>
+                              {isTrashVideo ? (
+                                <div style={{ opacity: 0.6, fontSize: 12, marginTop: 4 }}>
+                                  删除于 {deletedAt ? new Date(deletedAt).toLocaleString("zh-CN") : "-"}
+                                </div>
+                              ) : null}
+                            </div>
+                            <div style={{ width: 140, opacity: 0.65, fontSize: 12, textAlign: "right" }}>
+                              {new Date(it.updatedAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                            </div>
+                          </button>
+                          <button
+                            type="button"
+                            className="mr-item-action mr-item-row__menu"
                             aria-label={`条目菜单：${it.name}`}
                             onClick={(event) => {
                               event.stopPropagation();
@@ -1806,7 +1873,7 @@ export default function AppClient() {
                           >
                             <span aria-hidden="true">⋯</span>
                           </button>
-                        </button>
+                        </div>
                       );
                     })}
                   </div>
@@ -1817,62 +1884,66 @@ export default function AppClient() {
                       const deletedAt = "deletedAt" in it && typeof it.deletedAt === "number" ? it.deletedAt : null;
                       const isTrashVideo = scope === "trash" && it.kind === "video";
                       return (
-                        <button
+                        <div
                           key={it.id}
-                          type="button"
                           className={`mr-panel mr-card-button${selected ? " mr-card-button--selected" : ""}`}
                           onContextMenu={(event) => openContextMenu(event, it)}
-                          onClick={() => {
-                            void handleItemClick(it);
-                          }}
                         >
-                          <div
-                            className={`mr-card-button__preview${it.kind === "folder" ? " mr-card-button__preview--folder" : " mr-card-button__preview--video"}`}
+                          <button
+                            type="button"
+                            className="mr-card-button__surface"
+                            onClick={() => {
+                              void handleItemClick(it);
+                            }}
                           >
-                            {it.kind === "folder" ? <IconFolder size={22} /> : <VideoCardPreview name={it.name} previewUrl={previewUrls[it.id]} />}
-                            {scope === "workspace" && selectionMode ? (
-                              <span style={{ position: "absolute", top: 8, left: 8 }}>
-                                <input
-                                  type="checkbox"
-                                  checked={selected}
-                                  onChange={() => toggleSelected(it.id)}
-                                  onClick={(event) => event.stopPropagation()}
-                                  aria-label="选择"
-                                />
-                              </span>
-                            ) : null}
-                          </div>
+                            <div
+                              className={`mr-card-button__preview${it.kind === "folder" ? " mr-card-button__preview--folder" : " mr-card-button__preview--video"}`}
+                            >
+                              {it.kind === "folder" ? <IconFolder size={22} /> : <VideoCardPreview name={it.name} previewUrl={previewUrls[it.id]} />}
+                              {scope === "workspace" && selectionMode ? (
+                                <span style={{ position: "absolute", top: 8, left: 8 }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={selected}
+                                    onChange={() => toggleSelected(it.id)}
+                                    onClick={(event) => event.stopPropagation()}
+                                    aria-label="选择"
+                                  />
+                                </span>
+                              ) : null}
+                            </div>
 
-                          <div className="mr-card-button__body">
-                            <div className="mr-card-button__content" title={it.name}>
-                              <div className="mr-card-button__title">
-                                {it.name}
-                              </div>
-                              <div className="mr-card-button__meta">
-                                {it.kind === "video" ? (
-                                  <>
-                                    <div>{formatBytes(it.sizeBytes)} · {formatDuration(it.durationSeconds)}</div>
-                                    <div>{formatFrames(it)} · {formatResolution(it)}</div>
-                                    <div>{formatBitrate(it)}</div>
-                                    {isTrashVideo ? <div>删除于 {deletedAt ? new Date(deletedAt).toLocaleString("zh-CN") : "-"}</div> : null}
-                                  </>
-                                ) : "文件夹"}
+                            <div className="mr-card-button__body">
+                              <div className="mr-card-button__content" title={it.name}>
+                                <div className="mr-card-button__title">
+                                  {it.name}
+                                </div>
+                                <div className="mr-card-button__meta">
+                                  {it.kind === "video" ? (
+                                    <>
+                                      <div>{formatBytes(it.sizeBytes)} · {formatDuration(it.durationSeconds)}</div>
+                                      <div>{formatFrames(it)} · {formatResolution(it)}</div>
+                                      <div>{formatBitrate(it)}</div>
+                                      {isTrashVideo ? <div>删除于 {deletedAt ? new Date(deletedAt).toLocaleString("zh-CN") : "-"}</div> : null}
+                                    </>
+                                  ) : "文件夹"}
+                                </div>
                               </div>
                             </div>
-                            <button
-                              type="button"
-                              className="mr-item-action mr-item-action--overlay mr-card-button__menu"
-                              aria-label={`条目菜单：${it.name}`}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                const rect = event.currentTarget.getBoundingClientRect();
-                                setContextMenu({ x: Math.max(12, rect.right - 180), y: Math.max(12, rect.bottom + 8), target: it });
-                              }}
-                            >
-                              <span aria-hidden="true">⋯</span>
-                            </button>
-                          </div>
-                        </button>
+                          </button>
+                          <button
+                            type="button"
+                            className="mr-item-action mr-item-action--overlay mr-card-button__menu"
+                            aria-label={`条目菜单：${it.name}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              const rect = event.currentTarget.getBoundingClientRect();
+                              setContextMenu({ x: Math.max(12, rect.right - 180), y: Math.max(12, rect.bottom + 8), target: it });
+                            }}
+                          >
+                            <span aria-hidden="true">⋯</span>
+                          </button>
+                        </div>
                       );
                     })}
                   </div>
@@ -1961,20 +2032,20 @@ export default function AppClient() {
           }
           right={
             <div style={{ display: "grid", gap: 10 }}>
-              <div className={`mr-inspector-panel${inspectorOpen ? "" : " mr-inspector-panel--collapsed"}`}>
+              <div className={`mr-inspector-panel${inspectorPaneOpen ? "" : " mr-inspector-panel--collapsed"}`}>
                 <div className="mr-inspector-panel__head">
                   <div style={{ fontSize: 12, opacity: 0.7 }}>项目信息</div>
                   <button
                     className="mr-btn mr-btn--surface mr-inspector-toggle"
                     type="button"
-                    title={inspectorOpen ? "收起项目信息" : "展开项目信息"}
-                    aria-label={inspectorOpen ? "收起项目信息" : "展开项目信息"}
-                    onClick={() => setQuery({ inspector: inspectorOpen ? "0" : "1" })}
+                    title={inspectorPaneOpen ? "收起项目信息" : "展开项目信息"}
+                    aria-label={inspectorPaneOpen ? "收起项目信息" : "展开项目信息"}
+                    onClick={() => setQuery({ panel: inspectorPaneOpen ? "0" : "1" })}
                   >
                     <span aria-hidden="true">ⓘ</span>
                   </button>
                 </div>
-                {inspectorOpen ? (
+                {inspectorPaneOpen ? (
                   currentProject ? (
                     <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
                       <div>
@@ -2016,7 +2087,7 @@ export default function AppClient() {
                 )}
               </div>
 
-              {inspectorOpen ? (
+              {inspectorPaneOpen ? (
                 <div className="mr-panel" style={{ padding: 12, boxShadow: "none" }}>
                   <div style={{ fontSize: 12, opacity: 0.7 }}>当前状态</div>
                   <div style={{ marginTop: 8, opacity: 0.75, fontSize: 13, lineHeight: 1.5 }}>

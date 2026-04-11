@@ -18,7 +18,8 @@ const CreateMediaSchema = z.object({
 
 const UpdateMediaSchema = z.object({
   title: z.string().trim().min(1).max(200).optional(),
-  folderId: z.string().trim().min(1).nullable().optional()
+  folderId: z.string().trim().min(1).nullable().optional(),
+  rating: z.number().int().min(1).max(5).nullable().optional()
 });
 
 const PresignVideoSchema = z.object({
@@ -174,6 +175,65 @@ async function assertFolderAccess(projectId: string, folderId: string | null | u
   return !!folder;
 }
 
+async function getRatingSummary(mediaId: string, userId: string) {
+  const [aggregate, mine] = await Promise.all([
+    prisma.mediaRating.aggregate({
+      where: { mediaId },
+      _avg: { value: true },
+      _count: { _all: true }
+    }),
+    prisma.mediaRating.findUnique({
+      where: { mediaId_userId: { mediaId, userId } },
+      select: { value: true }
+    })
+  ]);
+
+  return {
+    myRating: mine?.value ?? null,
+    averageRating: aggregate._avg.value == null ? null : Number(aggregate._avg.value.toFixed(1)),
+    ratingCount: aggregate._count._all ?? 0
+  };
+}
+
+function mediaSelect(userId: string) {
+  return {
+    id: true,
+    projectId: true,
+    folderId: true,
+    title: true,
+    status: true,
+    reviewStatus: true,
+    versionIndex: true,
+    seriesId: true,
+    createdAt: true,
+    updatedAt: true,
+    files: {
+      select: {
+        id: true,
+        originalObjectKey: true,
+        derivedPrefix: true,
+        mode: true,
+        durationMs: true,
+        width: true,
+        height: true,
+        sizeBytes: true,
+        bitrateKbps: true,
+        frameCount: true,
+        createdAt: true
+      },
+      orderBy: { createdAt: "desc" }
+    },
+    ratings: {
+      where: { userId },
+      select: { value: true },
+      take: 1
+    },
+    _count: {
+      select: { ratings: true }
+    }
+  } as const;
+}
+
 export async function mediaRoutes(app: FastifyInstance) {
   app.post(
     "/projects/:projectId/media",
@@ -217,7 +277,14 @@ export async function mediaRoutes(app: FastifyInstance) {
         meta: { projectId, folderId: media.folderId }
       });
 
-      return reply.code(201).send({ media });
+      return reply.code(201).send({
+        media: {
+          ...media,
+          myRating: null,
+          averageRating: null,
+          ratingCount: 0
+        }
+      });
     }
   );
 
@@ -251,16 +318,30 @@ export async function mediaRoutes(app: FastifyInstance) {
       }
     });
 
+    if (input.rating !== undefined) {
+      if (input.rating === null) {
+        await prisma.mediaRating.deleteMany({ where: { mediaId, userId } });
+      } else {
+        await prisma.mediaRating.upsert({
+          where: { mediaId_userId: { mediaId, userId } },
+          update: { value: input.rating },
+          create: { mediaId, userId, value: input.rating }
+        });
+      }
+    }
+
+    const rating = await getRatingSummary(mediaId, userId);
+
     await auditLog({
       req,
       actorUserId: userId,
-      action: "media.update",
+      action: input.rating !== undefined ? "media.rate" : "media.update",
       entityType: "Media",
       entityId: media.id,
-      meta: { title: media.title, folderId: media.folderId }
+      meta: { title: media.title, folderId: media.folderId, rating: input.rating }
     });
 
-    return reply.send({ media });
+    return reply.send({ media: { ...media, ...rating } });
   });
 
   app.delete("/media/:mediaId", { preHandler: requireUser }, async (req, reply) => {
@@ -379,6 +460,9 @@ export async function mediaRoutes(app: FastifyInstance) {
       await tx.annotation.deleteMany({
         where: { mediaId: { in: mediaIds } }
       });
+      await tx.mediaRating.deleteMany({
+        where: { mediaId: { in: mediaIds } }
+      });
       await tx.shareLink.deleteMany({
         where: { mediaId: { in: mediaIds } }
       });
@@ -410,36 +494,28 @@ export async function mediaRoutes(app: FastifyInstance) {
 
     const media = await prisma.media.findUnique({
       where: { id: mediaId },
-      select: {
-        id: true,
-        projectId: true,
-        folderId: true,
-        title: true,
-        status: true,
-        reviewStatus: true,
-        versionIndex: true,
-        seriesId: true,
-        createdAt: true,
-        updatedAt: true,
-        files: {
-          select: {
-            id: true,
-            originalObjectKey: true,
-            derivedPrefix: true,
-            mode: true,
-            durationMs: true,
-            width: true,
-            height: true,
-            sizeBytes: true,
-            bitrateKbps: true,
-            frameCount: true,
-            createdAt: true
-          },
-          orderBy: { createdAt: "desc" }
-        }
-      }
+      select: mediaSelect(userId)
     });
-    return { media };
+    if (!media) return reply.code(404).send({ error: "not_found" });
+
+    const rating = await getRatingSummary(mediaId, userId);
+
+    return {
+      media: {
+        id: media.id,
+        projectId: media.projectId,
+        folderId: media.folderId,
+        title: media.title,
+        status: media.status,
+        reviewStatus: media.reviewStatus,
+        versionIndex: media.versionIndex,
+        seriesId: media.seriesId,
+        createdAt: media.createdAt,
+        updatedAt: media.updatedAt,
+        files: media.files,
+        ...rating
+      }
+    };
   });
 
   app.get("/media/:mediaId/preview", { preHandler: requireUser }, async (req, reply) => {

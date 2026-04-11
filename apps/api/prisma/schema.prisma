@@ -57,11 +57,13 @@ model User {
   updatedAt    DateTime @updatedAt
   deletedAt    DateTime?
 
-  memberships ProjectMember[]
-  projects    Project[]        @relation("ProjectOwner")
-  annotations Annotation[]
-  auditLogs   AuditLog[]
-  shareLinks  ShareLink[]
+  memberships          ProjectMember[]
+  projects             Project[]        @relation("ProjectOwner")
+  annotations          Annotation[]     @relation("AnnotationAuthor")
+  completedAnnotations Annotation[]     @relation("AnnotationCompleter")
+  mediaRatings         MediaRating[]
+  auditLogs            AuditLog[]
+  shareLinks           ShareLink[]
 }
 
 model Project {
@@ -137,6 +139,7 @@ model Media {
   series      MediaSeries?   @relation(fields: [seriesId], references: [id])
   files       MediaFile[]
   annotations Annotation[]
+  ratings     MediaRating[]
   shareLinks  ShareLink[]
 }
 
@@ -160,22 +163,43 @@ model MediaFile {
 }
 
 model Annotation {
-  id          String         @id @default(cuid())
-  projectId   String
-  mediaId     String
-  authorId    String
-  timestampMs Int
-  type        AnnotationType
-  rect        Json?
-  body        String
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
-  deletedAt   DateTime?
+  id            String         @id @default(cuid())
+  projectId     String
+  mediaId       String
+  authorId      String
+  parentId      String?
+  timestampMs   Int
+  type          AnnotationType
+  rect          Json?
+  body          String
+  color         String?
+  completedAt   DateTime?
+  completedById String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  deletedAt     DateTime?
 
   project     Project      @relation(fields: [projectId], references: [id])
   media       Media        @relation(fields: [mediaId], references: [id])
-  author      User         @relation(fields: [authorId], references: [id])
+  author      User         @relation("AnnotationAuthor", fields: [authorId], references: [id])
+  parent      Annotation?  @relation("AnnotationReplies", fields: [parentId], references: [id])
+  replies     Annotation[] @relation("AnnotationReplies")
+  completedBy User?        @relation("AnnotationCompleter", fields: [completedById], references: [id])
   attachments Attachment[]
+}
+
+model MediaRating {
+  id        String   @id @default(cuid())
+  mediaId    String
+  userId     String
+  value      Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  media Media @relation(fields: [mediaId], references: [id])
+  user  User  @relation(fields: [userId], references: [id])
+
+  @@unique([mediaId, userId])
 }
 
 model Attachment {

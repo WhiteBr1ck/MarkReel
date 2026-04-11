@@ -1,4 +1,8 @@
-import bcrypt from "bcryptjs";
+const bcrypt = require("bcryptjs") as {
+  genSalt(rounds?: number): Promise<string>;
+  hash(password: string, salt: string): Promise<string>;
+  compare(password: string, hash: string): Promise<boolean>;
+};
 
 export async function hashPassword(password: string) {
   const salt = await bcrypt.genSalt(10);

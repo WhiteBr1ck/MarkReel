@@ -1,6 +1,6 @@
 {
   "name": "markreel",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Open-source self-hosted video review and annotation tool.",
   "private": true,
   "packageManager": "npm@10.9.3",
@@ -27,5 +27,8 @@
   ],
   "devDependencies": {
     "concurrently": "^9.2.1"
+  },
+  "dependencies": {
+    "markreel": "file:"
   }
 }
