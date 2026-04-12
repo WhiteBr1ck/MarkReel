@@ -62,6 +62,14 @@ const DISPLAY_MODE_LABEL: Record<TimeDisplayMode, string> = {
   frames: "帧数"
 };
 
+function formatFpsValue(frameCount?: number, durationSeconds?: number) {
+  if (!frameCount || !durationSeconds || durationSeconds <= 0) return null;
+  const fps = frameCount / durationSeconds;
+  if (!Number.isFinite(fps) || fps <= 0) return null;
+  const rounded = Math.round(fps * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2).replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1");
+}
+
 const COLOR_PRESETS = ["#c96442", "#d7a55a", "#5f8f64", "#5f85d6", "#9a68d8", "#d55f8d"];
 const SPEEDS = [0.5, 1, 1.5, 2];
 
@@ -210,7 +218,7 @@ export function PlayerReview({ mediaId, title, previewUrl, item, onClose, loadAn
 
   const currentFrame = useMemo(() => {
     if (!item?.frameCount || frameStepSeconds <= 0) return null;
-    return clamp(Math.round(currentTime / frameStepSeconds) + 1, 1, item.frameCount);
+    return clamp(Math.floor(currentTime / frameStepSeconds) + 1, 1, item.frameCount);
   }, [currentTime, frameStepSeconds, item?.frameCount]);
 
   const timeDisplayValue = useMemo(() => {
@@ -222,6 +230,11 @@ export function PlayerReview({ mediaId, title, previewUrl, item, onClose, loadAn
     }
     return `${formatClock(currentTime)} / ${formatClock(duration)}`;
   }, [currentFrame, currentTime, duration, item?.frameCount, timeDisplayMode]);
+
+  const fpsLabel = useMemo(() => {
+    const value = formatFpsValue(item?.frameCount, duration || item?.durationSeconds);
+    return value ? `${value} FPS` : "未知";
+  }, [duration, item?.durationSeconds, item?.frameCount]);
 
   const annotationCountLabel = `${annotations.length} 条标注`;
 
@@ -474,7 +487,7 @@ export function PlayerReview({ mediaId, title, previewUrl, item, onClose, loadAn
                 <div className="mr-project-meta"><span>标题</span><strong>{title}</strong></div>
                 <div className="mr-project-meta"><span>时长</span><strong>{formatDuration(duration || item?.durationSeconds)}</strong></div>
                 <div className="mr-project-meta"><span>分辨率</span><strong>{item?.width && item?.height ? `${item.width}×${item.height}` : "未知"}</strong></div>
-                <div className="mr-project-meta"><span>帧数</span><strong>{item?.frameCount ? `${item.frameCount} 帧` : "未知"}</strong></div>
+                <div className="mr-project-meta"><span>FPS</span><strong>{fpsLabel}</strong></div>
                 <div className="mr-project-meta"><span>码率</span><strong>{item?.bitrateKbps ? `${item.bitrateKbps} kbps` : "未知"}</strong></div>
                 <div className="mr-project-meta"><span>大小</span><strong>{formatBytes(item?.sizeBytes)}</strong></div>
                 <div className="mr-project-meta"><span>状态</span><strong>{item?.status ?? "ready"}</strong></div>

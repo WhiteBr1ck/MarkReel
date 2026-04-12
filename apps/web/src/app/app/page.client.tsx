@@ -64,6 +64,26 @@ type PreviewResponse = {
   };
 };
 
+type MediaStatusResponse = {
+  media: {
+    id: string;
+    status: string;
+  };
+};
+
+type UploadMode = "original" | "compress";
+type UploadResolution = "1080p" | "720p";
+type UploadFps = "source" | 24 | 25 | 30 | 60;
+
+type UploadDraft = {
+  file: File | null;
+  title: string;
+  mode: UploadMode;
+  targetResolution: UploadResolution;
+  targetFps: UploadFps;
+  folderId: string;
+};
+
 type AnnotationListResponse = {
   annotations: AnnotationRecord[];
 };
@@ -150,7 +170,9 @@ function toZhError(e: any): string {
     invalid_credentials: "用户名或密码不正确",
     unauthorized: "未登录或登录已过期",
     database_unavailable: "数据库不可用，请先启动 API 的 SQLite/Prisma 链路",
-    internal_server_error: "服务器内部错误（请查看 API 控制台日志）"
+    internal_server_error: "服务器内部错误（请查看 API 控制台日志）",
+    processing_failed: "视频处理失败，请检查 worker、ffmpeg 和对象存储日志",
+    queue_unavailable: "压缩队列不可用，请先启动 Redis、worker，并确认 REDIS_URL 可连通"
   };
   return map[code] ?? code;
 }
@@ -177,14 +199,61 @@ function formatResolution(item: Extract<WorkspaceItem, { kind: "video" }>) {
   return `${item.width}×${item.height}`;
 }
 
+function formatFpsValue(frameCount?: number, durationSeconds?: number) {
+  if (!frameCount || !durationSeconds || durationSeconds <= 0) return null;
+  const fps = frameCount / durationSeconds;
+  if (!Number.isFinite(fps) || fps <= 0) return null;
+  const rounded = Math.round(fps * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2).replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1");
+}
+
 function formatFrames(item: Extract<WorkspaceItem, { kind: "video" }>) {
-  if (!item.frameCount) return "帧数未知";
-  return `${item.frameCount} 帧`;
+  const fps = formatFpsValue(item.frameCount, item.durationSeconds);
+  if (!fps) return "FPS 未知";
+  return `${fps} FPS`;
 }
 
 function formatBitrate(item: Extract<WorkspaceItem, { kind: "video" }>) {
   if (!item.bitrateKbps) return "码率未知";
   return `${item.bitrateKbps} kbps`;
+}
+
+function formatUploadError(e: any) {
+  let message = toZhError(e);
+  if (typeof e?.message === "string" && e.message.startsWith("upload_failed:")) {
+    const detail = e.message.slice("upload_failed:".length);
+    if (detail === "network") {
+      message = "上传文件失败：浏览器无法直连对象存储，请确认 MinIO 正在运行且已允许 http://localhost:5090 跨域上传";
+    } else {
+      message = `上传文件失败：对象存储返回 ${detail}`;
+    }
+  }
+  return message;
+}
+
+function stripFileExtension(fileName: string) {
+  const lastDot = fileName.lastIndexOf(".");
+  return lastDot > 0 ? fileName.slice(0, lastDot) : fileName;
+}
+
+function buildFolderOptions(rootId: string | null, folderTree: FolderNode | null) {
+  if (!rootId) return [] as Array<{ id: string; label: string }>;
+
+  const options: Array<{ id: string; label: string }> = [{ id: rootId, label: "根目录" }];
+
+  function walk(nodes: FolderNode[] | undefined, depth: number) {
+    if (!nodes?.length) return;
+    for (const node of nodes) {
+      options.push({
+        id: node.id,
+        label: `${"　".repeat(depth)}${node.name}`
+      });
+      walk(node.children, depth + 1);
+    }
+  }
+
+  walk(folderTree?.children, 0);
+  return options;
 }
 
 function formatSortLabel(sort: SortMode) {
@@ -262,6 +331,7 @@ export default function AppClient() {
   const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [uploadDraft, setUploadDraft] = useState<UploadDraft | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -559,6 +629,10 @@ export default function AppClient() {
     });
   }
 
+  function wait(ms: number) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
   async function cachePreviewUrl(mediaId: string) {
     if (previewUrls[mediaId]) return previewUrls[mediaId];
     const data = await api<PreviewResponse>(`/media/${mediaId}/preview`);
@@ -588,22 +662,56 @@ export default function AppClient() {
   }
 
   async function markUploadReady(id: string, mediaId: string) {
-    try {
-      await api<PreviewResponse>(`/media/${mediaId}/preview`);
-      setUploadReady(id, mediaId);
-    } catch (e: any) {
-      if (e?.data?.error === "preview_not_ready") {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      try {
+        const preview = await api<PreviewResponse>(`/media/${mediaId}/preview`);
+        setPreviewUrls((prev) => ({ ...prev, [mediaId]: preview.preview.url }));
+        setUploadReady(id, mediaId);
+        await refreshWorkspace();
+        return true;
+      } catch (e: any) {
+        if (e?.data?.error === "processing_failed") {
+          setUploadError(id, "视频处理失败，请检查 worker、ffmpeg 和对象存储日志");
+          return false;
+        }
+
+        if (e?.data?.error !== "preview_not_ready") {
+          const message = formatUploadError(e);
+          setUploadError(id, message);
+          return false;
+        }
+
+        const detail = await api<MediaStatusResponse>(`/media/${mediaId}`);
+        const status = detail.media.status;
+
+        if (status === "failed") {
+          setUploadError(id, "视频处理失败，请检查 worker、ffmpeg 和对象存储日志");
+          return false;
+        }
+
         updateUpload(id, {
           stage: "processing",
           progress: 98,
           mediaId,
-          actionLabel: "预览生成中"
+          actionLabel:
+            status === "queued"
+              ? "已上传，等待处理"
+              : status === "processing"
+                ? "已上传，正在生成预览"
+                : "预览生成中"
         });
-        return false;
+
+        await wait(1500);
       }
-      throw e;
     }
-    return true;
+
+    updateUpload(id, {
+      stage: "processing",
+      progress: 98,
+      mediaId,
+      actionLabel: "已上传，等待处理完成"
+    });
+    return false;
   }
 
   async function onAuth() {
@@ -770,6 +878,18 @@ export default function AppClient() {
 
   function openCreateFolderDialog() {
     setDialog({ type: "create_folder", value: "新建文件夹" });
+  }
+
+  function openUploadDialog() {
+    if (!effectivePid || !rootFid) return;
+    setUploadDraft({
+      file: null,
+      title: "",
+      mode: "compress",
+      targetResolution: "1080p",
+      targetFps: 30,
+      folderId: effectiveFid ?? rootFid
+    });
   }
 
   function openCreateWorkspaceDialog() {
@@ -1108,82 +1228,82 @@ export default function AppClient() {
     showFeedback("success", "已清空上传记录");
   }
 
-  async function onUpload(files: File[]) {
-    if (!effectivePid) return;
+  async function onUpload(draft: UploadDraft) {
+    if (!effectivePid || !rootFid || !draft.file) return;
     setErr(null);
     setBusy(true);
-    showFeedback("info", `已加入 ${files.length} 个上传任务`);
+    showFeedback("info", "已加入 1 个上传任务");
 
-    const queued = files.map((file, index) => ({
-      id: `${Date.now()}-${index}-${file.name}`,
-      fileName: file.name,
-      progress: 2,
-      stage: "preparing" as UploadStage,
-      actionLabel: "排队中"
-    }));
+    const uploadId = `${Date.now()}-0-${draft.file.name}`;
+    const queued = [
+      {
+        id: uploadId,
+        fileName: draft.title,
+        progress: 2,
+        stage: "preparing" as UploadStage,
+        actionLabel: "排队中"
+      }
+    ];
     setUploads((prev) => [...queued, ...prev].slice(0, 12));
 
     try {
-      for (let i = 0; i < files.length; i += 1) {
-        const file = files[i]!;
-        const uploadId = queued[i]!.id;
-        updateUpload(uploadId, { stage: "preparing", progress: 5, actionLabel: "准备上传" });
+      updateUpload(uploadId, { stage: "preparing", progress: 5, actionLabel: "准备上传" });
 
-        const created = await api<{ media: { id: string } }>(`/projects/${effectivePid}/media`, {
+      const created = await api<{ media: { id: string } }>(`/projects/${effectivePid}/media`, {
+        method: "POST",
+        body: JSON.stringify({
+          title: draft.title,
+          folderId: draft.folderId === rootFid ? null : draft.folderId
+        })
+      });
+
+      updateUpload(uploadId, { mediaId: created.media.id, stage: "signing", progress: 12, actionLabel: "获取上传地址" });
+
+      const presigned = await api<{ upload: { url: string; objectKey: string; mode: "original" | "compress" } }>(
+        `/media/${created.media.id}/upload/presign`,
+        {
           method: "POST",
           body: JSON.stringify({
-            title: file.name,
-            folderId: effectiveFid === rootFid ? null : effectiveFid
+            filename: draft.file.name,
+            contentType: draft.file.type || "application/octet-stream",
+            mode: draft.mode
           })
-        });
+        }
+      );
 
-        updateUpload(uploadId, { mediaId: created.media.id, stage: "signing", progress: 12, actionLabel: "获取上传地址" });
+      updateUpload(uploadId, { stage: "uploading", progress: 18, actionLabel: "正在上传文件" });
+      await uploadToPresignedUrl(presigned.upload.url, draft.file, (progress) => {
+        updateUpload(uploadId, { stage: "uploading", progress: Math.max(18, progress), actionLabel: "正在上传文件" });
+      });
 
-        const presigned = await api<{ upload: { url: string; objectKey: string; mode: "original" | "compress" } }>(
-          `/media/${created.media.id}/upload/presign`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              filename: file.name,
-              contentType: file.type || "application/octet-stream",
-              mode: "compress"
-            })
-          }
-        );
+      updateUpload(uploadId, {
+        stage: "processing",
+        progress: 96,
+        actionLabel: draft.mode === "compress" ? "已上传，等待处理" : "已上传，正在刷新预览"
+      });
+      await api(`/media/${created.media.id}/process`, {
+        method: "POST",
+        body: JSON.stringify({
+          mode: presigned.upload.mode,
+          originalObjectKey: presigned.upload.objectKey,
+          transcode:
+            draft.mode === "compress"
+              ? {
+                  resolution: draft.targetResolution,
+                  fps: draft.targetFps
+                }
+              : undefined
+        })
+      });
 
-        updateUpload(uploadId, { stage: "uploading", progress: 18, actionLabel: "正在上传文件" });
-        await uploadToPresignedUrl(presigned.upload.url, file, (progress) => {
-          updateUpload(uploadId, { stage: "uploading", progress: Math.max(18, progress), actionLabel: "正在上传文件" });
-        });
-
-        updateUpload(uploadId, { stage: "processing", progress: 96, actionLabel: "已上传，正在生成预览" });
-        await api(`/media/${created.media.id}/process`, {
-          method: "POST",
-          body: JSON.stringify({
-            mode: presigned.upload.mode,
-            originalObjectKey: presigned.upload.objectKey
-          })
-        });
-
-        await markUploadReady(uploadId, created.media.id);
-      }
-
-      await refreshWorkspace(effectivePid, effectiveFid);
+      void markUploadReady(uploadId, created.media.id);
+      await refreshWorkspace(effectivePid, draft.folderId);
       showFeedback("success", "上传请求已完成，正在为新素材刷新工作台");
     } catch (e: any) {
-      let message = toZhError(e);
-      if (typeof e?.message === "string" && e.message.startsWith("upload_failed:")) {
-        const detail = e.message.slice("upload_failed:".length);
-        if (detail === "network") {
-          message = "上传文件失败：浏览器无法直连对象存储，请确认 MinIO 正在运行且已允许 http://localhost:5090 跨域上传";
-        } else {
-          message = `上传文件失败：对象存储返回 ${detail}`;
-        }
-      }
+      const message = formatUploadError(e);
       setErr(message);
       showFeedback("error", message);
-      const failed = queued.find((item) => item.stage !== "error");
-      if (failed) setUploadError(failed.id, message);
+      setUploadError(uploadId, message);
     } finally {
       setBusy(false);
     }
@@ -1194,6 +1314,7 @@ export default function AppClient() {
   const filteredTrashItems = useMemo(() => sortItems(filterItems(trashItems, q), sort), [trashItems, q, sort]);
   const visibleItems = scope === "trash" ? filteredTrashItems : items;
   const crumbs = workspace?.breadcrumbs ?? [];
+  const folderOptions = useMemo(() => buildFolderOptions(rootFid, workspace?.folderTree ?? null), [rootFid, workspace?.folderTree]);
 
   useEffect(() => {
     const visibleVideos = items.slice(0, view === "grid" ? 8 : 4);
@@ -1356,6 +1477,140 @@ export default function AppClient() {
           <div className="mr-dialog__note mr-dialog__note--danger">
             该操作会永久移除回收站中的所有视频，仅建议在确认不再需要恢复时执行。
           </div>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={!!uploadDraft}
+        title="上传视频"
+        description="先确认视频名称、压缩参数和目标目录，再开始上传。"
+        onClose={() => setUploadDraft(null)}
+        footer={
+          <>
+            <button type="button" className="mr-btn mr-btn--ghost" onClick={() => setUploadDraft(null)}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="mr-btn mr-btn--primary"
+              disabled={busy || !uploadDraft?.file || !uploadDraft.title.trim() || !uploadDraft.folderId}
+              onClick={() => {
+                if (!uploadDraft?.file || !uploadDraft.title.trim() || !uploadDraft.folderId) return;
+                const nextDraft = { ...uploadDraft, title: uploadDraft.title.trim() };
+                setUploadDraft(null);
+                void onUpload(nextDraft);
+              }}
+            >
+              {busy ? "上传中…" : "开始上传"}
+            </button>
+          </>
+        }
+      >
+        <div className="mr-upload-dialog">
+          <label className="mr-field">
+            <span className="mr-field__label">选择视频文件</span>
+            <input
+              className="mr-input mr-upload-dialog__file-input"
+              type="file"
+              accept="video/*"
+              onChange={(e) => {
+                const file = e.target.files?.[0] ?? null;
+                setUploadDraft((prev) => {
+                  if (!prev || !file) return prev;
+                  const nextTitle = prev.title.trim() ? prev.title : stripFileExtension(file.name);
+                  return { ...prev, file, title: nextTitle };
+                });
+                e.currentTarget.value = "";
+              }}
+            />
+            <span className="mr-upload-dialog__hint">
+              {uploadDraft?.file ? `已选择：${uploadDraft.file.name}` : "暂未选择文件"}
+            </span>
+          </label>
+
+          <label className="mr-field">
+            <span className="mr-field__label">视频名称</span>
+            <input
+              className="mr-input"
+              value={uploadDraft?.title ?? ""}
+              maxLength={200}
+              placeholder="输入视频名称"
+              onChange={(e) => setUploadDraft((prev) => (prev ? { ...prev, title: e.target.value } : prev))}
+            />
+          </label>
+
+          <div className="mr-upload-dialog__grid">
+            <label className="mr-field">
+              <span className="mr-field__label">上传模式</span>
+              <select
+                className="mr-input mr-upload-dialog__select"
+                value={uploadDraft?.mode ?? "compress"}
+                onChange={(e) => setUploadDraft((prev) => (prev ? { ...prev, mode: e.target.value as UploadMode } : prev))}
+              >
+                <option value="compress">压缩上传</option>
+                <option value="original">原始上传</option>
+              </select>
+            </label>
+
+            <label className="mr-field">
+              <span className="mr-field__label">上传目标路径</span>
+              <select
+                className="mr-input mr-upload-dialog__select"
+                value={uploadDraft?.folderId ?? rootFid ?? ""}
+                onChange={(e) => setUploadDraft((prev) => (prev ? { ...prev, folderId: e.target.value } : prev))}
+              >
+                {folderOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className={`mr-upload-dialog__grid${uploadDraft?.mode === "compress" ? "" : " mr-upload-dialog__grid--disabled"}`}>
+            <label className="mr-field">
+              <span className="mr-field__label">压缩分辨率</span>
+              <select
+                className="mr-input mr-upload-dialog__select"
+                value={uploadDraft?.targetResolution ?? "1080p"}
+                disabled={uploadDraft?.mode !== "compress"}
+                onChange={(e) => setUploadDraft((prev) => (prev ? { ...prev, targetResolution: e.target.value as UploadResolution } : prev))}
+              >
+                <option value="1080p">1080P</option>
+                <option value="720p">720P</option>
+              </select>
+            </label>
+
+            <label className="mr-field">
+              <span className="mr-field__label">压缩帧率</span>
+              <select
+                className="mr-input mr-upload-dialog__select"
+                value={String(uploadDraft?.targetFps ?? 30)}
+                disabled={uploadDraft?.mode !== "compress"}
+                onChange={(e) => setUploadDraft((prev) => {
+                  if (!prev) return prev;
+                  const value = e.target.value;
+                  return {
+                    ...prev,
+                    targetFps: value === "source" ? "source" : Number(value) as UploadFps
+                  };
+                })}
+              >
+                <option value="source">保持原帧率</option>
+                <option value="24">24 FPS</option>
+                <option value="25">25 FPS</option>
+                <option value="30">30 FPS</option>
+                <option value="60">60 FPS</option>
+              </select>
+            </label>
+          </div>
+
+          {uploadDraft?.mode === "original" ? (
+            <div className="mr-dialog__note">
+              原始上传会保留原始文件，分辨率与帧率选项不会生效。
+            </div>
+          ) : null}
         </div>
       </Dialog>
 
@@ -1678,7 +1933,7 @@ export default function AppClient() {
                       </>
                     ) : (
                       <>
-                        <button className="mr-btn mr-btn--primary" type="button" onClick={() => document.getElementById("mr-upload-input")?.click()}>
+                        <button className="mr-btn mr-btn--primary" type="button" onClick={() => openUploadDialog()}>
                           上传视频
                         </button>
                         <button className="mr-btn" type="button" onClick={() => openCreateFolderDialog()}>
@@ -1777,19 +2032,6 @@ export default function AppClient() {
                       ) : null}
                     </div>
                   </div>
-                  <input
-                    id="mr-upload-input"
-                    type="file"
-                    accept="video/*"
-                    multiple
-                    style={{ display: "none" }}
-                    onChange={(e) => {
-                      const files = Array.from(e.target.files ?? []);
-                      if (files.length === 0) return;
-                      void onUpload(files);
-                      e.currentTarget.value = "";
-                    }}
-                  />
                 </div>
 
                 {scope === "workspace" && selectionMode ? (

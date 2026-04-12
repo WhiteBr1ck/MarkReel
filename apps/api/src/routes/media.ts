@@ -28,9 +28,15 @@ const PresignVideoSchema = z.object({
   mode: z.enum(["original", "compress"]).default("compress")
 });
 
+const TranscodeSchema = z.object({
+  resolution: z.enum(["1080p", "720p"]).optional(),
+  fps: z.union([z.literal("source"), z.literal(24), z.literal(25), z.literal(30), z.literal(60)]).optional()
+});
+
 const EnqueueSchema = z.object({
   mode: z.enum(["original", "compress"]),
-  originalObjectKey: z.string().min(1)
+  originalObjectKey: z.string().min(1),
+  transcode: TranscodeSchema.optional()
 });
 
 const PreviewQuerySchema = z.object({
@@ -207,6 +213,17 @@ function mediaSelect(userId: string) {
     seriesId: true,
     createdAt: true,
     updatedAt: true,
+    project: {
+      select: {
+        owner: {
+          select: {
+            id: true,
+            username: true,
+            displayName: true
+          }
+        }
+      }
+    },
     files: {
       select: {
         id: true,
@@ -512,6 +529,13 @@ export async function mediaRoutes(app: FastifyInstance) {
         seriesId: media.seriesId,
         createdAt: media.createdAt,
         updatedAt: media.updatedAt,
+        creator: media.project.owner
+          ? {
+              id: media.project.owner.id,
+              username: media.project.owner.username,
+              displayName: media.project.owner.displayName
+            }
+          : null,
         files: media.files,
         ...rating
       }
@@ -530,9 +554,12 @@ export async function mediaRoutes(app: FastifyInstance) {
       select: {
         id: true,
         title: true,
+        status: true,
         files: {
           select: {
             originalObjectKey: true,
+            derivedPrefix: true,
+            mode: true,
             createdAt: true
           },
           orderBy: { createdAt: "desc" },
@@ -546,10 +573,30 @@ export async function mediaRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: "preview_not_ready" });
     }
 
-    const url = await presignGetObject({
-      bucket: env.S3_BUCKET_ORIGINAL,
-      objectKey: file.originalObjectKey
-    });
+    const previewTarget =
+      file.mode === "compress"
+        ? media.status === "failed"
+          ? null
+          : file.derivedPrefix && media.status === "ready"
+            ? {
+                bucket: env.S3_BUCKET_DERIVED,
+                objectKey: file.derivedPrefix
+              }
+            : null
+        : {
+            bucket: env.S3_BUCKET_ORIGINAL,
+            objectKey: file.originalObjectKey
+          };
+
+    if (file.mode === "compress" && media.status === "failed") {
+      return reply.code(409).send({ error: "processing_failed" });
+    }
+
+    if (!previewTarget) {
+      return reply.code(404).send({ error: "preview_not_ready" });
+    }
+
+    const url = await presignGetObject(previewTarget);
 
     await auditLog({
       req,
@@ -557,7 +604,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       action: "media.preview",
       entityType: "Media",
       entityId: mediaId,
-      meta: { objectKey: file.originalObjectKey }
+      meta: { objectKey: previewTarget.objectKey, bucket: previewTarget.bucket }
     });
 
     return reply.send({
@@ -669,6 +716,7 @@ export async function mediaRoutes(app: FastifyInstance) {
     if (!access) return reply.code(404).send({ error: "not_found" });
 
     const input = EnqueueSchema.parse(req.body);
+    const transcode = input.mode === "compress" ? input.transcode : undefined;
 
     const metadata = await readMediaMetadata(input.originalObjectKey);
 
@@ -703,23 +751,40 @@ export async function mediaRoutes(app: FastifyInstance) {
       }
     });
 
+    if (input.mode === "original") {
+      await prisma.media.update({
+        where: { id: mediaId },
+        data: { status: "ready" }
+      });
+      return reply.send({ ok: true, queued: false, metadata });
+    }
+
     if (!mediaQueue) {
       await prisma.media.update({
         where: { id: mediaId },
-        data: { status: "uploaded" }
+        data: { status: "failed" }
       });
-      return reply.send({ ok: true, queued: false, metadata });
+      return reply.code(503).send({ error: "queue_unavailable" });
+    }
+
+    try {
+      await mediaQueue.add("transcode", {
+        mediaId,
+        originalObjectKey: input.originalObjectKey,
+        mode: input.mode,
+        transcode
+      });
+    } catch {
+      await prisma.media.update({
+        where: { id: mediaId },
+        data: { status: "failed" }
+      });
+      return reply.code(503).send({ error: "queue_unavailable" });
     }
 
     await prisma.media.update({
       where: { id: mediaId },
       data: { status: "queued" }
-    });
-
-    await mediaQueue.add("transcode", {
-      mediaId,
-      originalObjectKey: input.originalObjectKey,
-      mode: input.mode
     });
 
     await auditLog({
@@ -728,7 +793,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       action: "media.enqueue",
       entityType: "Media",
       entityId: mediaId,
-      meta: { mode: input.mode }
+      meta: { mode: input.mode, transcode }
     });
 
     return reply.send({ ok: true, queued: true, metadata });

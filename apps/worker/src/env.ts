@@ -1,10 +1,15 @@
 import { z } from "zod";
 import * as dotenv from "dotenv";
+import fs from "node:fs";
 import path from "node:path";
 
-const envFile =
-  process.env.MARKREEL_ENV_FILE ||
-  path.resolve(__dirname, "..", "..", "..", ".env");
+const envCandidates = [
+  process.env.MARKREEL_ENV_FILE,
+  path.resolve(__dirname, "..", "..", "..", ".env.local"),
+  path.resolve(__dirname, "..", "..", "..", ".env")
+].filter((value): value is string => Boolean(value));
+
+const envFile = envCandidates.find((candidate) => fs.existsSync(candidate)) ?? envCandidates[0]!;
 
 dotenv.config({ path: envFile });
 

@@ -19,6 +19,11 @@ type MediaDetail = {
   seriesId: string | null;
   createdAt: string;
   updatedAt: string;
+  creator?: {
+    id: string;
+    username: string;
+    displayName: string | null;
+  } | null;
   files: Array<{
     id: string;
     originalObjectKey: string;
@@ -93,9 +98,16 @@ type SidebarTab = "file" | "annotations";
 type AnnotationStatusFilter = "all" | "completed" | "incomplete";
 type TimeDisplayMode = "elapsed_total" | "remaining_total" | "frame";
 type PendingImage = AnnotationAttachment & { localUrl?: string };
+type DraftMode = "edit" | "reply";
+type UploadTarget = "composer" | "draft";
 
 const COLOR_PRESETS = ["#c96442", "#d7a55a", "#5f8f64", "#5f85d6", "#9a68d8", "#d55f8d"];
 const SPEED_PRESETS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+const TIME_DISPLAY_OPTIONS: Array<{ value: TimeDisplayMode; label: string; description: string }> = [
+  { value: "elapsed_total", label: "当前 / 总时长", description: "显示当前播放时间与总时长，例如 01:23/10:00。" },
+  { value: "remaining_total", label: "剩余 / 总时长", description: "显示剩余时长与总时长，例如 -08:37/10:00。" },
+  { value: "frame", label: "当前帧 / 总帧", description: "按当前帧数显示，适合逐帧审阅。" }
+];
 const UI_HIDE_DELAY_MS = 2000;
 
 function PlayerIcon({ children }: { children: ReactNode }) {
@@ -256,6 +268,32 @@ function mergePreviewUrls(items: AnnotationRecord[], map: Record<string, string>
   }));
 }
 
+function clonePendingImages(items: AnnotationAttachment[]): PendingImage[] {
+  return items.map((item) => ({ ...item }));
+}
+
+function releasePendingImages(items: PendingImage[]) {
+  items.forEach((item) => {
+    if (item.localUrl) URL.revokeObjectURL(item.localUrl);
+  });
+}
+
+function toAttachmentPayload(items: PendingImage[]) {
+  return items
+    .filter((item) => item.objectKey)
+    .map((item) => ({
+      kind: item.kind,
+      objectKey: item.objectKey,
+      mimeType: item.mimeType,
+      width: item.width,
+      height: item.height
+    }));
+}
+
+function getReplyPrefix(annotation: AnnotationRecord) {
+  return `回复@${annotation.author?.displayName ?? annotation.author?.username ?? "admin"}：`;
+}
+
 function IconButton({ title, onClick, children, active = false, disabled = false }: { title: string; onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void; children: ReactNode; active?: boolean; disabled?: boolean }) {
   return (
     <button
@@ -293,10 +331,19 @@ function PlayerPageInner() {
   const [annotationError, setAnnotationError] = useState<string | null>(null);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("annotations");
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
-  const [editingAnnotationId, setEditingAnnotationId] = useState<string | null>(null);
-  const [editingBody, setEditingBody] = useState("");
-  const [editingColor, setEditingColor] = useState(COLOR_PRESETS[0]!);
-  const [editingSubmitting, setEditingSubmitting] = useState(false);
+  const [composerBody, setComposerBody] = useState("");
+  const [composerColor, setComposerColor] = useState(COLOR_PRESETS[0]!);
+  const [composerAttachments, setComposerAttachments] = useState<PendingImage[]>([]);
+  const [composerSubmitting, setComposerSubmitting] = useState(false);
+  const [composerUploading, setComposerUploading] = useState(false);
+  const [draftMode, setDraftMode] = useState<DraftMode | null>(null);
+  const [draftTargetId, setDraftTargetId] = useState<string | null>(null);
+  const [draftBody, setDraftBody] = useState("");
+  const [draftColor, setDraftColor] = useState(COLOR_PRESETS[0]!);
+  const [draftAttachments, setDraftAttachments] = useState<PendingImage[]>([]);
+  const [draftSubmitting, setDraftSubmitting] = useState(false);
+  const [draftUploading, setDraftUploading] = useState(false);
+  const [attachmentInputTarget, setAttachmentInputTarget] = useState<UploadTarget>("composer");
   const [deleteTarget, setDeleteTarget] = useState<AnnotationRecord | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -305,12 +352,9 @@ function PlayerPageInner() {
   const [playbackRate, setPlaybackRate] = useState(1);
   const [customSpeed, setCustomSpeed] = useState("1");
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
+  const [showShortcutDialog, setShowShortcutDialog] = useState(false);
+  const [showTimeDisplayDialog, setShowTimeDisplayDialog] = useState(false);
   const [timeDisplayMode, setTimeDisplayMode] = useState<TimeDisplayMode>("elapsed_total");
-  const [body, setBody] = useState("");
-  const [color, setColor] = useState(COLOR_PRESETS[0]!);
-  const [attachments, setAttachments] = useState<PendingImage[]>([]);
-  const [submitting, setSubmitting] = useState(false);
-  const [uploading, setUploading] = useState(false);
   const [annotationEditorFullscreen, setAnnotationEditorFullscreen] = useState(false);
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
@@ -360,11 +404,16 @@ function PlayerPageInner() {
   }, [mediaId]);
 
   async function hydrateAttachmentPreviewUrls(list: AnnotationRecord[]) {
-    const attachmentsToLoad = list.flatMap((annotation) =>
-      annotation.attachments
+    const attachmentsToLoad = list.flatMap((annotation) => [
+      ...annotation.attachments
         .filter((attachment) => attachment.id && !attachment.previewUrl)
-        .map((attachment) => ({ annotationId: annotation.id, attachmentId: attachment.id! }))
-    );
+        .map((attachment) => ({ annotationId: annotation.id, attachmentId: attachment.id! })),
+      ...(annotation.replies ?? []).flatMap((reply) =>
+        reply.attachments
+          .filter((attachment) => attachment.id && !attachment.previewUrl)
+          .map((attachment) => ({ annotationId: reply.id, attachmentId: attachment.id! }))
+      )
+    ]);
     if (attachmentsToLoad.length === 0) return list;
     const previews = await Promise.all(
       attachmentsToLoad.map(async ({ annotationId, attachmentId }) => {
@@ -467,11 +516,10 @@ function PlayerPageInner() {
   useEffect(() => {
     return () => {
       if (clickTimerRef.current) window.clearTimeout(clickTimerRef.current);
-      attachments.forEach((attachment) => {
-        if (attachment.localUrl) URL.revokeObjectURL(attachment.localUrl);
-      });
+      releasePendingImages(composerAttachments);
+      releasePendingImages(draftAttachments);
     };
-  }, [attachments]);
+  }, [composerAttachments, draftAttachments]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -518,9 +566,22 @@ function PlayerPageInner() {
     if (!primaryFile?.frameCount || duration <= 0) return null;
     return clamp(Math.round(currentTime / frameStepSeconds) + 1, 1, primaryFile.frameCount);
   }, [currentTime, duration, frameStepSeconds, primaryFile?.frameCount]);
+  const derivedFps = useMemo(() => {
+    if (!primaryFile?.frameCount || !primaryFile.durationMs || primaryFile.durationMs <= 0) return null;
+    const fps = primaryFile.frameCount / (primaryFile.durationMs / 1000);
+    if (!Number.isFinite(fps) || fps <= 0) return null;
+    return fps;
+  }, [primaryFile?.durationMs, primaryFile?.frameCount]);
+  const fpsDisplay = useMemo(() => {
+    if (!derivedFps) return "未知";
+    const rounded = Math.round(derivedFps * 100) / 100;
+    return Number.isInteger(rounded) ? `${rounded}` : `${rounded.toFixed(2).replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1")}`;
+  }, [derivedFps]);
 
   const selectedAnnotation = annotations.find((item) => item.id === selectedAnnotationId) ?? null;
-
+  const flatAnnotations = useMemo(() => annotations.flatMap((item) => [item, ...(item.replies ?? [])]), [annotations]);
+  const draftTargetAnnotation = useMemo(() => flatAnnotations.find((item) => item.id === draftTargetId) ?? null, [draftTargetId, flatAnnotations]);
+  const isCreateDraft = draftMode == null;
   const timeDisplayValue = useMemo(() => {
     if (timeDisplayMode === "remaining_total") return `-${formatClock(Math.max(0, duration - currentTime))}/${formatClock(duration)}`;
     if (timeDisplayMode === "frame") {
@@ -530,9 +591,16 @@ function PlayerPageInner() {
     return `${formatClock(currentTime)}/${formatClock(duration)}`;
   }, [currentFrame, currentTime, duration, primaryFile?.frameCount, timeDisplayMode]);
 
+  function clearUiHideTimer() {
+    if (uiHideTimerRef.current) {
+      window.clearTimeout(uiHideTimerRef.current);
+      uiHideTimerRef.current = null;
+    }
+  }
+
   function scheduleUiHide() {
     if (!isFullscreen || pinUi) return;
-    if (uiHideTimerRef.current) window.clearTimeout(uiHideTimerRef.current);
+    clearUiHideTimer();
     setShowUi(true);
     uiHideTimerRef.current = window.setTimeout(() => setShowUi(false), UI_HIDE_DELAY_MS);
   }
@@ -541,6 +609,23 @@ function PlayerPageInner() {
     if (!isFullscreen) return;
     setShowUi(true);
     scheduleUiHide();
+  }
+
+  function keepUiVisible() {
+    if (!isFullscreen) return;
+    clearUiHideTimer();
+    setShowUi(true);
+  }
+
+  function resumeUiHide() {
+    if (!isFullscreen || pinUi) return;
+    scheduleUiHide();
+  }
+
+  function hideUiNow() {
+    if (!isFullscreen || pinUi) return;
+    clearUiHideTimer();
+    setShowUi(false);
   }
 
   function seekTo(seconds: number) {
@@ -592,12 +677,8 @@ function PlayerPageInner() {
     setSpeed(next);
   }
 
-  function cycleTimeDisplayMode() {
-    setTimeDisplayMode((prev) => {
-      if (prev === "elapsed_total") return "remaining_total";
-      if (prev === "remaining_total") return "frame";
-      return "elapsed_total";
-    });
+  function openTimeDisplayDialog() {
+    setShowTimeDisplayDialog(true);
   }
 
   function setVideoVolume(next: number) {
@@ -623,14 +704,22 @@ function PlayerPageInner() {
     setVolume(video.volume);
   }
 
-  async function uploadFiles(files: File[]) {
+  async function uploadFiles(files: File[], target: UploadTarget) {
     if (files.length === 0) return;
-    setUploading(true);
+    if (target === "draft") {
+      setDraftUploading(true);
+    } else {
+      setComposerUploading(true);
+    }
     setAnnotationError(null);
     let local: PendingImage[] = [];
     try {
       local = await Promise.all(files.map((file) => fileToPendingImage(file)));
-      setAttachments((prev) => [...prev, ...local]);
+      if (target === "draft") {
+        setDraftAttachments((prev) => [...prev, ...local]);
+      } else {
+        setComposerAttachments((prev) => [...prev, ...local]);
+      }
 
       const uploaded = await Promise.all(
         files.map(async (file, index) => {
@@ -650,101 +739,106 @@ function PlayerPageInner() {
         })
       );
 
-      setAttachments((prev) => {
+      const applyUploaded = (prev: PendingImage[]) => {
         const remain = [...prev];
         local.forEach((item) => {
           const idx = remain.findIndex((candidate) => candidate.localUrl === item.localUrl);
           if (idx >= 0) remain.splice(idx, 1);
         });
         return [...remain, ...uploaded];
-      });
+      };
+
+      if (target === "draft") {
+        setDraftAttachments(applyUploaded);
+      } else {
+        setComposerAttachments(applyUploaded);
+      }
     } catch (e) {
-      local.forEach((attachment) => {
-        if (attachment.localUrl) URL.revokeObjectURL(attachment.localUrl);
-      });
-      setAttachments((prev) => prev.filter((candidate) => !local.some((item) => item.localUrl === candidate.localUrl)));
+      releasePendingImages(local);
+      const cleanup = (prev: PendingImage[]) => prev.filter((candidate) => !local.some((item) => item.localUrl === candidate.localUrl));
+      if (target === "draft") {
+        setDraftAttachments(cleanup);
+      } else {
+        setComposerAttachments(cleanup);
+      }
       setAnnotationError(toZhError(e));
     } finally {
-      setUploading(false);
+      if (target === "draft") {
+        setDraftUploading(false);
+      } else {
+        setComposerUploading(false);
+      }
       if (attachmentInputRef.current) attachmentInputRef.current.value = "";
     }
   }
 
   async function handleAttachmentInput(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? []);
-    await uploadFiles(files);
+    await uploadFiles(files, attachmentInputTarget);
   }
 
-  async function handleComposerPaste(event: ClipboardEvent<HTMLDivElement>) {
+  async function handleEditorPaste(event: ClipboardEvent<HTMLElement>, target: UploadTarget) {
     const files = Array.from(event.clipboardData.files ?? []).filter((file) => file.type.startsWith("image/"));
     if (files.length === 0) return;
     event.preventDefault();
-    await uploadFiles(files);
+    await uploadFiles(files, target);
+  }
+
+  function triggerAttachmentPicker(target: UploadTarget) {
+    setAttachmentInputTarget(target);
+    attachmentInputRef.current?.click();
+  }
+
+  function removeComposerAttachment(index: number) {
+    setComposerAttachments((prev) => {
+      const target = prev[index];
+      if (target?.localUrl) URL.revokeObjectURL(target.localUrl);
+      return prev.filter((_, itemIndex) => itemIndex !== index);
+    });
+  }
+
+  function removeDraftAttachment(index: number) {
+    setDraftAttachments((prev) => {
+      const target = prev[index];
+      if (target?.localUrl) URL.revokeObjectURL(target.localUrl);
+      return prev.filter((_, itemIndex) => itemIndex !== index);
+    });
   }
 
   function resetComposer() {
-    attachments.forEach((attachment) => {
-      if (attachment.localUrl) URL.revokeObjectURL(attachment.localUrl);
-    });
-    setBody("");
-    setAttachments([]);
+    releasePendingImages(composerAttachments);
+    setComposerBody("");
+    setComposerColor(COLOR_PRESETS[0]!);
+    setComposerAttachments([]);
   }
 
-  function cancelSidebarEditing() {
-    setEditingAnnotationId(null);
-    setEditingBody("");
-    setEditingColor(COLOR_PRESETS[0]!);
+  function closeDraft() {
+    releasePendingImages(draftAttachments);
+    setDraftMode(null);
+    setDraftTargetId(null);
+    setDraftBody("");
+    setDraftColor(COLOR_PRESETS[0]!);
+    setDraftAttachments([]);
   }
 
-  async function persistAnnotation() {
-    const cleanBody = body.trim();
-    if (!cleanBody && attachments.length === 0) return;
-    if (!mediaId) {
-      setAnnotationError("未找到对应素材");
-      return;
-    }
-    setSubmitting(true);
-    setAnnotationError(null);
-    try {
-      await api(`/media/${mediaId}/annotations`, {
-        method: "POST",
-        body: JSON.stringify({
-          timestampMs: Math.max(0, Math.round(currentTime * 1000)),
-          type: cleanBody ? "text" : "pin",
-          body: cleanBody,
-          color,
-          attachments: attachments.map((attachment) => ({
-            kind: attachment.kind,
-            objectKey: attachment.objectKey,
-            mimeType: attachment.mimeType,
-            width: attachment.width,
-            height: attachment.height
-          }))
-        })
-      });
-      const next = await reloadAnnotations();
-      setSelectedAnnotationId(next.at(-1)?.id ?? null);
-      setSidebarTab("annotations");
-      resetComposer();
-    } catch (e: any) {
-      const detail = e?.data?.issues?.[0]?.message as string | undefined;
-      setAnnotationError(detail ?? toZhError(e));
-    } finally {
-      setSubmitting(false);
-    }
+  function cancelDraft() {
+    closeDraft();
   }
 
-  function editAnnotation(annotation: AnnotationRecord) {
-    setSelectedAnnotationId(annotation.id);
-    setEditingAnnotationId(annotation.id);
-    setEditingBody(annotation.body);
-    setEditingColor(annotation.color || COLOR_PRESETS[0]!);
+  function openEditDraft(annotation: AnnotationRecord) {
+    releasePendingImages(draftAttachments);
+    setDraftMode("edit");
+    setDraftTargetId(annotation.id);
+    setDraftBody(annotation.body);
+    setDraftColor(annotation.color || COLOR_PRESETS[0]!);
+    setDraftAttachments(clonePendingImages(annotation.attachments));
+    setSelectedAnnotationId(annotation.parentId ?? annotation.id);
     setSidebarTab("annotations");
     seekTo(annotation.timestampMs / 1000);
   }
 
   function selectAnnotation(annotation: AnnotationRecord) {
-    setSelectedAnnotationId(annotation.id);
+    setSelectedAnnotationId(annotation.parentId ?? annotation.id);
     setSidebarTab("annotations");
     seekTo(annotation.timestampMs / 1000);
   }
@@ -763,55 +857,87 @@ function PlayerPageInner() {
     }
   }
 
-  async function saveSidebarEdit(annotation: AnnotationRecord) {
-    const cleanBody = editingBody.trim();
-    setEditingSubmitting(true);
-    setAnnotationError(null);
-    try {
-      await api(`/annotations/${annotation.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          timestampMs: annotation.timestampMs,
-          body: cleanBody,
-          color: editingColor,
-          attachments: annotation.attachments.map((item) => ({
-            kind: item.kind,
-            objectKey: item.objectKey,
-            mimeType: item.mimeType,
-            width: item.width,
-            height: item.height
-          }))
-        })
-      });
-      await reloadAnnotations();
-      cancelSidebarEditing();
-    } catch (e: any) {
-      const detail = e?.data?.issues?.[0]?.message as string | undefined;
-      setAnnotationError(detail ?? toZhError(e));
-    } finally {
-      setEditingSubmitting(false);
+  async function createAnnotation() {
+    const cleanBody = composerBody.trim();
+    if (!cleanBody && composerAttachments.length === 0) return;
+    if (!mediaId) {
+      setAnnotationError("未找到对应素材");
+      return;
     }
-  }
-
-  async function createReply(annotation: AnnotationRecord) {
-    if (!mediaId) return;
+    setComposerSubmitting(true);
     setAnnotationError(null);
     try {
       await api(`/media/${mediaId}/annotations`, {
         method: "POST",
         body: JSON.stringify({
-          timestampMs: annotation.timestampMs,
-          type: "text",
-          body: `回复@${annotation.author?.displayName ?? annotation.author?.username ?? "用户"}：`,
-          color: annotation.color ?? COLOR_PRESETS[0],
-          parentId: annotation.id,
-          attachments: []
+          timestampMs: Math.max(0, Math.round(currentTime * 1000)),
+          type: cleanBody ? "text" : "pin",
+          body: cleanBody,
+          color: composerColor,
+          attachments: toAttachmentPayload(composerAttachments)
         })
       });
       const next = await reloadAnnotations();
-      setSelectedAnnotationId(next.find((item) => item.id === annotation.id)?.id ?? annotation.id);
-    } catch (e) {
-      setAnnotationError(toZhError(e));
+      setSelectedAnnotationId(next.at(-1)?.id ?? null);
+      setSidebarTab("annotations");
+      resetComposer();
+    } catch (e: any) {
+      const detail = e?.data?.issues?.[0]?.message as string | undefined;
+      setAnnotationError(detail ?? toZhError(e));
+    } finally {
+      setComposerSubmitting(false);
+    }
+  }
+
+  async function submitDraft(targetAnnotation?: AnnotationRecord) {
+    const cleanBody = draftBody.trim();
+    if (!cleanBody && draftAttachments.length === 0) return;
+    if (!mediaId || !draftMode) {
+      setAnnotationError("未找到对应素材");
+      return;
+    }
+    setDraftSubmitting(true);
+    setAnnotationError(null);
+    try {
+      if (draftMode === "edit") {
+        const editingTarget = targetAnnotation ?? flatAnnotations.find((item) => item.id === draftTargetId);
+        if (!editingTarget || !draftTargetId) throw new Error("not_found");
+        await api(`/annotations/${draftTargetId}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            timestampMs: editingTarget.timestampMs,
+            body: cleanBody,
+            color: draftColor,
+            attachments: toAttachmentPayload(draftAttachments)
+          })
+        });
+      } else {
+        await api(`/media/${mediaId}/annotations`, {
+          method: "POST",
+          body: JSON.stringify({
+            timestampMs: Math.max(0, Math.round(currentTime * 1000)),
+            type: cleanBody ? "text" : "pin",
+            body: cleanBody,
+            color: draftColor,
+            parentId: draftTargetId,
+            attachments: toAttachmentPayload(draftAttachments)
+          })
+        });
+      }
+      const next = await reloadAnnotations();
+      if (draftMode === "reply" && draftTargetId) {
+        setSelectedAnnotationId(draftTargetId);
+      } else {
+        const targetId = targetAnnotation?.parentId ?? targetAnnotation?.id ?? draftTargetId;
+        setSelectedAnnotationId(targetId ?? next.at(-1)?.id ?? null);
+      }
+      setSidebarTab("annotations");
+      closeDraft();
+    } catch (e: any) {
+      const detail = e?.data?.issues?.[0]?.message as string | undefined;
+      setAnnotationError(detail ?? toZhError(e));
+    } finally {
+      setDraftSubmitting(false);
     }
   }
 
@@ -823,8 +949,8 @@ function PlayerPageInner() {
       if (selectedAnnotationId === annotationId) {
         setSelectedAnnotationId(next[0]?.id ?? null);
       }
-      if (editingAnnotationId === annotationId) {
-        cancelSidebarEditing();
+      if (draftMode === "edit" && draftTargetId === annotationId) {
+        closeDraft();
       }
       setDeleteTarget(null);
     } catch (e) {
@@ -848,8 +974,12 @@ function PlayerPageInner() {
   }
 
   function openReplyDraft(annotation: AnnotationRecord) {
-    setBody(`回复@${annotation.author?.displayName ?? annotation.author?.username ?? "用户"}：`);
-    setColor(annotation.color || COLOR_PRESETS[0]!);
+    releasePendingImages(draftAttachments);
+    setDraftMode("reply");
+    setDraftTargetId(annotation.id);
+    setDraftBody(getReplyPrefix(annotation));
+    setDraftColor(annotation.color || COLOR_PRESETS[0]!);
+    setDraftAttachments([]);
     setSidebarTab("annotations");
     setSelectedAnnotationId(annotation.id);
     seekTo(annotation.timestampMs / 1000);
@@ -997,18 +1127,23 @@ function PlayerPageInner() {
           <div
             className={`mr-player-page__video-shell${isFullscreen ? " mr-player-page__video-shell--fullscreen" : ""}${showUi ? " mr-player-page__video-shell--ui" : " mr-player-page__video-shell--ui-hidden"}`}
             ref={videoShellRef}
-            onMouseMove={revealUi}
-            onMouseLeave={() => !pinUi && isFullscreen && setShowUi(false)}
-            onClick={handleVideoSurfaceClick}
-            onDoubleClick={handleVideoSurfaceDoubleClick}
+            onMouseLeave={() => !pinUi && isFullscreen && hideUiNow()}
           >
-            <video ref={videoRef} key={previewUrl} src={previewUrl} autoPlay playsInline className="mr-player-page__video" />
+            <div
+              className={`mr-player-page__video-surface${showUi ? "" : " mr-player-page__video-surface--ui-hidden"}`}
+              onMouseMove={revealUi}
+              onMouseLeave={hideUiNow}
+              onClick={handleVideoSurfaceClick}
+              onDoubleClick={handleVideoSurfaceDoubleClick}
+            >
+              <video ref={videoRef} key={previewUrl} src={previewUrl} autoPlay playsInline className="mr-player-page__video" />
+            </div>
             <div className={`mr-player-page__overlay mr-player-page__overlay--top${showUi ? "" : " mr-player-page__overlay--hidden"}`}>
-              <div className="mr-player-page__overlay-chip">{timeDisplayValue}</div>
-              <div className="mr-player-page__overlay-chip">{annotations.length} 条标注</div>
+              <div className="mr-player-page__overlay-chip" onMouseEnter={keepUiVisible} onMouseLeave={resumeUiHide}>{timeDisplayValue}</div>
+              <div className="mr-player-page__overlay-chip" onMouseEnter={keepUiVisible} onMouseLeave={resumeUiHide}>{annotations.length} 条标注</div>
             </div>
             <div className={`mr-player-page__overlay mr-player-page__overlay--bottom${showUi ? "" : " mr-player-page__overlay--hidden"}`}>
-              <div className="mr-player-page__timeline-stack">
+              <div className="mr-player-page__timeline-stack" onMouseEnter={keepUiVisible} onMouseLeave={resumeUiHide}>
                 <div className="mr-player-page__timeline-meta">
                   <span>{formatClock(currentTime)}</span>
                   <span>{formatClock(duration)}</span>
@@ -1025,7 +1160,7 @@ function PlayerPageInner() {
                           key={annotation.id}
                           type="button"
                           className={`mr-player-page__marker${selectedAnnotationId === annotation.id ? " mr-player-page__marker--active" : ""}`}
-                          style={{ left, background: annotation.color || color }}
+                          style={{ left, background: annotation.color || COLOR_PRESETS[0] }}
                           title={`${formatClock(annotation.timestampMs / 1000)} ${annotation.body || "标注"}`}
                           onClick={() => selectAnnotation(annotation)}
                         />
@@ -1046,7 +1181,7 @@ function PlayerPageInner() {
                 </div>
               </div>
               <div className="mr-player-page__controls">
-                <div className="mr-player-page__control-group">
+                <div className="mr-player-page__control-group" onMouseEnter={keepUiVisible} onMouseLeave={resumeUiHide}>
                   <IconButton title={isPlaying ? "暂停" : "播放"} onClick={() => void togglePlayback()}>
                     <PlayerIcon>{isPlaying ? "❚❚" : "▶"}</PlayerIcon>
                   </IconButton>
@@ -1070,7 +1205,7 @@ function PlayerPageInner() {
                     <PlayerIcon>|▶</PlayerIcon>
                   </IconButton>
                 </div>
-                <div className="mr-player-page__control-group mr-player-page__control-group--right">
+                <div className="mr-player-page__control-group mr-player-page__control-group--right" onMouseEnter={keepUiVisible} onMouseLeave={resumeUiHide}>
                   <div className="mr-player-page__volume-wrap">
                     <IconButton title={muted ? "取消静音" : "静音"} onClick={toggleMute}>
                       <PlayerIcon>{muted || volume === 0 ? "🔇" : volume < 0.5 ? "🔉" : "🔊"}</PlayerIcon>
@@ -1097,7 +1232,7 @@ function PlayerPageInner() {
                       </div>
                     ) : null}
                   </div>
-                  <IconButton title="切换时间显示" onClick={cycleTimeDisplayMode} active>
+                  <IconButton title="切换时间显示" onClick={openTimeDisplayDialog} active>
                     <PlayerIcon>{timeDisplayMode === "frame" ? "#" : timeDisplayMode === "remaining_total" ? "⌛" : "⏱"}</PlayerIcon>
                   </IconButton>
                   <IconButton title={pinUi ? "关闭 UI 常驻" : "开启 UI 常驻"} onClick={() => setPinUi((prev) => !prev)} active={pinUi}>
@@ -1119,52 +1254,71 @@ function PlayerPageInner() {
               </div>
               <div className="mr-player-page__composer-actions">
                 <div className="mr-badge">{formatClock(currentTime)}</div>
+                <button className="mr-btn" type="button" onClick={() => setShowShortcutDialog(true)}>快捷键</button>
                 <button className="mr-btn" type="button" onClick={() => setAnnotationEditorFullscreen((prev) => !prev)}>{annotationEditorFullscreen ? "退出全屏编辑" : "全屏编辑"}</button>
               </div>
             </div>
 
-            <div className="mr-player-page__editor-shell" onPaste={(event) => void handleComposerPaste(event)}>
+            <div className="mr-player-page__editor-shell" onPaste={(event) => void handleEditorPaste(event, "composer")}>
               <textarea
-                className="mr-input mr-player-page__textarea"
+                className={`mr-input mr-player-page__textarea${composerAttachments.length > 0 ? " mr-player-page__textarea--with-attachments" : ""}`}
                 placeholder={annotationEditorFullscreen ? "输入标注内容；可直接 Ctrl+V 粘贴图片" : "输入标注内容或摘要"}
-                value={body}
-                onChange={(event) => setBody(event.target.value)}
+                value={composerBody}
+                onChange={(event) => setComposerBody(event.target.value)}
               />
-              {attachments.length > 0 ? (
+              {composerAttachments.length > 0 ? (
                 <div className="mr-player-page__attachment-grid">
-                  {attachments.map((attachment, index) => (
+                  {composerAttachments.map((attachment, index) => (
                     <figure key={`${attachment.objectKey || attachment.localUrl || index}-${index}`} className="mr-player-page__attachment-card">
-                      {attachment.previewUrl ? <img className="mr-player-page__attachment-image" src={attachment.previewUrl} alt="annotation attachment" /> : <div className="mr-player-page__attachment-fallback">图片</div>}
-                      <figcaption className="mr-player-page__attachment-caption">{attachment.width && attachment.height ? `${attachment.width}×${attachment.height}` : "image"}</figcaption>
-                      <button className="mr-player-page__attachment-remove mr-player-page__attachment-remove--floating" type="button" onClick={() => setAttachments((prev) => prev.filter((_, itemIndex) => itemIndex !== index))}>×</button>
+                      {attachment.previewUrl ? (
+                        <button type="button" className="mr-player-page__annotation-image-link" onClick={() => openAttachmentModal(attachment.previewUrl!)}>
+                          <img className="mr-player-page__attachment-image" src={attachment.previewUrl} alt="annotation attachment" />
+                          <figcaption className="mr-player-page__attachment-caption">{attachment.width && attachment.height ? `${attachment.width}×${attachment.height}` : "image"}</figcaption>
+                        </button>
+                      ) : (
+                        <div className="mr-player-page__attachment-fallback">图片</div>
+                      )}
+                      <button
+                        className="mr-player-page__attachment-remove mr-player-page__attachment-remove--floating"
+                        type="button"
+                        onClick={() => removeComposerAttachment(index)}
+                      >
+                        ×
+                      </button>
                     </figure>
                   ))}
                 </div>
               ) : null}
             </div>
 
-            <div className="mr-player-page__composer-row">
-              <div className="mr-player-page__swatches">
-                {COLOR_PRESETS.map((swatch) => (
-                  <button
-                    key={swatch}
-                    type="button"
-                    className={`mr-player-page__swatch${color === swatch ? " mr-player-page__swatch--active" : ""}`}
-                    style={{ background: swatch }}
-                    onClick={() => setColor(swatch)}
-                    aria-label={`颜色 ${swatch}`}
-                  />
-                ))}
+            <div className="mr-player-page__composer-footer">
+              <div className="mr-player-page__composer-row">
+                <div className="mr-player-page__swatches">
+                  {COLOR_PRESETS.map((swatch) => (
+                    <button
+                      key={swatch}
+                      type="button"
+                      className={`mr-player-page__swatch${composerColor === swatch ? " mr-player-page__swatch--active" : ""}`}
+                      style={{ background: swatch }}
+                      onClick={() => setComposerColor(swatch)}
+                      aria-label={`颜色 ${swatch}`}
+                    />
+                  ))}
+                </div>
+                <button className="mr-btn" type="button" onClick={() => triggerAttachmentPicker("composer")}>{composerUploading ? "上传图片中…" : "插入图片"}</button>
+                <input ref={attachmentInputRef} id="mr-player-page-attachment-input" type="file" accept="image/*" multiple hidden onChange={handleAttachmentInput} />
+                <button
+                  className="mr-btn mr-btn--primary"
+                  type="button"
+                  onClick={() => void createAnnotation()}
+                  disabled={composerSubmitting || composerUploading || (!composerBody.trim() && composerAttachments.length === 0)}
+                >
+                  {composerSubmitting ? "创建中…" : "创建标注"}
+                </button>
               </div>
-              <label className="mr-btn" htmlFor="mr-player-page-attachment-input">{uploading ? "上传图片中…" : "插入图片"}</label>
-              <input ref={attachmentInputRef} id="mr-player-page-attachment-input" type="file" accept="image/*" multiple hidden onChange={handleAttachmentInput} />
-              <button className="mr-btn mr-btn--primary" type="button" onClick={() => void persistAnnotation()} disabled={submitting || uploading || (!body.trim() && attachments.length === 0)}>
-                {submitting ? "创建中…" : "创建标注"}
-              </button>
-            </div>
 
-            <div className="mr-player-page__shortcut-note">快捷键：Space 播放/暂停，←/→ 前后 5 秒，F 全屏，M 静音；长按前进按钮可倍速快进。</div>
-            {annotationError ? <div className="mr-feedback mr-feedback--error">{annotationError}</div> : null}
+              {annotationError ? <div className="mr-feedback mr-feedback--error">{annotationError}</div> : null}
+            </div>
           </section>
         </section>
 
@@ -1178,9 +1332,11 @@ function PlayerPageInner() {
             <div className="mr-panel mr-player-page__sidebar-card">
               <div className="mr-player-page__meta-grid">
                 <div className="mr-project-meta mr-player-page__meta-row"><span>标题</span><strong className="mr-player-page__meta-value mr-player-page__meta-value--wrap">{media.title}</strong></div>
+                <div className="mr-project-meta mr-player-page__meta-row"><span>创建者</span><strong className="mr-player-page__meta-value mr-player-page__meta-value--wrap">{media.creator?.displayName || media.creator?.username || "未知"}</strong></div>
+                <div className="mr-project-meta mr-player-page__meta-row"><span>创建时间</span><strong>{formatDateTime(media.createdAt)}</strong></div>
                 <div className="mr-project-meta mr-player-page__meta-row"><span>时长</span><strong>{formatDuration(duration)}</strong></div>
                 <div className="mr-project-meta mr-player-page__meta-row"><span>分辨率</span><strong>{primaryFile?.width && primaryFile?.height ? `${primaryFile.width}×${primaryFile.height}` : "未知"}</strong></div>
-                <div className="mr-project-meta mr-player-page__meta-row"><span>帧数</span><strong>{primaryFile?.frameCount ? `${primaryFile.frameCount} 帧` : "未知"}</strong></div>
+                <div className="mr-project-meta mr-player-page__meta-row"><span>FPS</span><strong>{fpsDisplay}</strong></div>
                 <div className="mr-project-meta mr-player-page__meta-row"><span>码率</span><strong>{primaryFile?.bitrateKbps ? `${primaryFile.bitrateKbps} kbps` : "未知"}</strong></div>
                 <div className="mr-project-meta mr-player-page__meta-row"><span>大小</span><strong>{formatBytes(primaryFile?.sizeBytes ?? undefined)}</strong></div>
                 <div className="mr-project-meta mr-player-page__meta-row"><span>状态</span><strong>{media.status}</strong></div>
@@ -1239,18 +1395,22 @@ function PlayerPageInner() {
                 <div className="mr-player-page__empty">还没有标注，先创建第一条。</div>
               ) : (
                 <div className="mr-player-page__annotation-list">
-                  {annotations.map((annotation) => {
+                  {annotations.map((annotation, annotationIndex) => {
                     const displayName = annotation.author?.displayName ?? annotation.author?.username ?? "未知用户";
-                    const isEditing = editingAnnotationId === annotation.id;
+                    const isEditing = draftMode === "edit" && draftTargetId === annotation.id;
+                    const showReplyDraft = draftMode === "reply" && draftTargetId === annotation.id;
+                    const annotationNumber = annotationIndex + 1;
                     return (
                       <article key={annotation.id} className={`mr-player-page__annotation-item${selectedAnnotationId === annotation.id ? " mr-player-page__annotation-item--active" : ""}`}>
                         <div className="mr-player-page__annotation-main">
                           <div className="mr-player-page__annotation-card-head">
                             <button type="button" className="mr-player-page__annotation-anchor" onClick={() => selectAnnotation(annotation)}>
+                              <span className="mr-player-page__annotation-order" aria-hidden="true">{annotationNumber}</span>
                               <span className="mr-player-page__annotation-avatar">{displayName.slice(0, 1)}</span>
                               <span className="mr-player-page__annotation-author-block">
                                 <span className="mr-player-page__annotation-author-row">
                                   <strong>{displayName}</strong>
+                                  <span className="mr-badge">#{annotationNumber}</span>
                                   <span className="mr-badge">{formatClock(annotation.timestampMs / 1000)}</span>
                                 </span>
                                 <span className="mr-player-page__annotation-meta">{formatDateTime(annotation.createdAt)}</span>
@@ -1269,101 +1429,289 @@ function PlayerPageInner() {
 
                           {isEditing ? (
                             <div className="mr-player-page__annotation-editing">
-                              <textarea className="mr-input mr-player-page__annotation-edit-textarea mr-player-page__textarea" value={editingBody} onChange={(event) => setEditingBody(event.target.value)} />
+                              <textarea
+                                className="mr-input mr-player-page__annotation-edit-textarea mr-player-page__textarea"
+                                value={draftBody}
+                                onChange={(event) => setDraftBody(event.target.value)}
+                                onPaste={(event) => void handleEditorPaste(event, "draft")}
+                              />
+                              {draftAttachments.length > 0 ? (
+                                <div className="mr-player-page__attachment-grid">
+                                  {draftAttachments.map((attachment, index) => (
+                                    <figure key={`${attachment.objectKey || attachment.localUrl || index}-${index}`} className="mr-player-page__attachment-card">
+                                      {attachment.previewUrl ? (
+                                        <button type="button" className="mr-player-page__annotation-image-link" onClick={() => openAttachmentModal(attachment.previewUrl!)}>
+                                          <img className="mr-player-page__attachment-image" src={attachment.previewUrl} alt="annotation attachment" />
+                                          <figcaption className="mr-player-page__attachment-caption">{attachment.width && attachment.height ? `${attachment.width}×${attachment.height}` : "image"}</figcaption>
+                                        </button>
+                                      ) : (
+                                        <div className="mr-player-page__attachment-fallback">图片</div>
+                                      )}
+                                      <button
+                                        className="mr-player-page__attachment-remove mr-player-page__attachment-remove--floating"
+                                        type="button"
+                                        onClick={() => {
+                                          setDraftAttachments((prev) => {
+                                            const target = prev[index];
+                                            if (target?.localUrl) URL.revokeObjectURL(target.localUrl);
+                                            return prev.filter((_, itemIndex) => itemIndex !== index);
+                                          });
+                                        }}
+                                      >
+                                        ×
+                                      </button>
+                                    </figure>
+                                  ))}
+                                </div>
+                              ) : null}
                               <div className="mr-player-page__annotation-edit-tools">
                                 <div className="mr-player-page__swatches">
                                   {COLOR_PRESETS.map((swatch) => (
                                     <button
                                       key={swatch}
                                       type="button"
-                                      className={`mr-player-page__swatch${editingColor === swatch ? " mr-player-page__swatch--active" : ""}`}
+                                      className={`mr-player-page__swatch${draftColor === swatch ? " mr-player-page__swatch--active" : ""}`}
                                       style={{ background: swatch }}
-                                      onClick={() => setEditingColor(swatch)}
+                                      onClick={() => setDraftColor(swatch)}
                                       aria-label={`颜色 ${swatch}`}
                                     />
                                   ))}
                                 </div>
-                                <div className="mr-player-page__annotation-actions">
-                                  <IconButton title="取消编辑" onClick={cancelSidebarEditing}>
-                                    <PlayerIcon>✕</PlayerIcon>
-                                  </IconButton>
-                                  <IconButton title="保存编辑" onClick={() => void saveSidebarEdit(annotation)} disabled={editingSubmitting}>
-                                    <PlayerIcon>{editingSubmitting ? "…" : "✓"}</PlayerIcon>
-                                  </IconButton>
+                                <div className="mr-player-page__annotation-edit-tools-right">
+                                  <button className="mr-btn" type="button" onClick={() => triggerAttachmentPicker("draft")}>{draftUploading ? "上传图片中…" : "插入图片"}</button>
+                                  <button className="mr-btn" type="button" onClick={cancelDraft} disabled={draftSubmitting || draftUploading}>取消</button>
+                                  <button className="mr-btn mr-btn--primary" type="button" onClick={() => void submitDraft(annotation)} disabled={draftSubmitting || draftUploading || (!draftBody.trim() && draftAttachments.length === 0)}>
+                                    {draftSubmitting ? "保存中…" : "保存编辑"}
+                                  </button>
                                 </div>
                               </div>
                             </div>
                           ) : (
                             <>
                               <div className="mr-player-page__annotation-body">{annotation.body || "（仅图片标注）"}</div>
-                              {annotation.replies?.length ? (
+                              {annotation.attachments.length > 0 ? (
+                                <div className="mr-player-page__annotation-attachments mr-player-page__annotation-attachments--images">
+                                  {annotation.attachments.map((attachment, index) => (
+                                    <button
+                                      key={`${attachment.objectKey}-${index}`}
+                                      type="button"
+                                      className="mr-player-page__annotation-image-link"
+                                      onClick={() => attachment.previewUrl ? openAttachmentModal(attachment.previewUrl) : undefined}
+                                    >
+                                      {attachment.previewUrl ? <img className="mr-player-page__annotation-image" src={attachment.previewUrl} alt="annotation attachment" /> : null}
+                                      <span className="mr-badge">{attachment.width && attachment.height ? `${attachment.width}×${attachment.height}` : "image"}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : null}
+                              {annotation.replies?.length || showReplyDraft ? (
                                 <div className="mr-player-page__annotation-replies">
-                                  {annotation.replies.map((reply) => {
+                                  {annotation.replies?.map((reply, replyIndex) => {
                                     const replyName = reply.author?.displayName ?? reply.author?.username ?? "未知用户";
+                                    const isReplyEditing = draftMode === "edit" && draftTargetId === reply.id;
+                                    const replyNumber = `${annotationNumber}-${replyIndex + 1}`;
                                     return (
                                       <div key={reply.id} className="mr-player-page__annotation-reply">
+                                        <span className="mr-player-page__annotation-order mr-player-page__annotation-order--reply" aria-hidden="true">{replyNumber}</span>
                                         <span className="mr-player-page__annotation-avatar mr-player-page__annotation-avatar--reply">{replyName.slice(0, 1)}</span>
                                         <div className="mr-player-page__annotation-reply-body">
                                           <div className="mr-player-page__annotation-author-row">
                                             <strong>{replyName}</strong>
+                                            <span className="mr-badge">#{replyNumber}</span>
                                             <span className="mr-badge">{formatClock(reply.timestampMs / 1000)}</span>
                                           </div>
-                                          <div className="mr-player-page__annotation-body">{reply.body || `回复@${displayName}：`}</div>
+                                          <span className="mr-player-page__annotation-meta">{formatDateTime(reply.createdAt)}</span>
+                                          {isReplyEditing ? (
+                                            <div className="mr-player-page__annotation-editing">
+                                              <textarea
+                                                className="mr-input mr-player-page__annotation-edit-textarea mr-player-page__textarea"
+                                                value={draftBody}
+                                                onChange={(event) => setDraftBody(event.target.value)}
+                                                onPaste={(event) => void handleEditorPaste(event, "draft")}
+                                              />
+                                              {draftAttachments.length > 0 ? (
+                                                <div className="mr-player-page__attachment-grid">
+                                                  {draftAttachments.map((attachment, index) => (
+                                                    <figure key={`${attachment.objectKey || attachment.localUrl || index}-${index}`} className="mr-player-page__attachment-card">
+                                                      {attachment.previewUrl ? (
+                                                        <button type="button" className="mr-player-page__annotation-image-link" onClick={() => openAttachmentModal(attachment.previewUrl!)}>
+                                                          <img className="mr-player-page__attachment-image" src={attachment.previewUrl} alt="annotation attachment" />
+                                                          <figcaption className="mr-player-page__attachment-caption">{attachment.width && attachment.height ? `${attachment.width}×${attachment.height}` : "image"}</figcaption>
+                                                        </button>
+                                                      ) : (
+                                                        <div className="mr-player-page__attachment-fallback">图片</div>
+                                                      )}
+                                                      <button
+                                                        className="mr-player-page__attachment-remove mr-player-page__attachment-remove--floating"
+                                                        type="button"
+                                                        onClick={() => {
+                                                          setDraftAttachments((prev) => {
+                                                            const target = prev[index];
+                                                            if (target?.localUrl) URL.revokeObjectURL(target.localUrl);
+                                                            return prev.filter((_, itemIndex) => itemIndex !== index);
+                                                          });
+                                                        }}
+                                                      >
+                                                        ×
+                                                      </button>
+                                                    </figure>
+                                                  ))}
+                                                </div>
+                                              ) : null}
+                                              <div className="mr-player-page__annotation-edit-tools">
+                                                <div className="mr-player-page__swatches">
+                                                  {COLOR_PRESETS.map((swatch) => (
+                                                    <button
+                                                      key={swatch}
+                                                      type="button"
+                                                      className={`mr-player-page__swatch${draftColor === swatch ? " mr-player-page__swatch--active" : ""}`}
+                                                      style={{ background: swatch }}
+                                                      onClick={() => setDraftColor(swatch)}
+                                                      aria-label={`颜色 ${swatch}`}
+                                                    />
+                                                  ))}
+                                                </div>
+                                                <div className="mr-player-page__annotation-edit-tools-right">
+                                                  <button className="mr-btn" type="button" onClick={() => triggerAttachmentPicker("draft")}>{draftUploading ? "上传图片中…" : "插入图片"}</button>
+                                                  <button className="mr-btn" type="button" onClick={cancelDraft} disabled={draftSubmitting || draftUploading}>取消</button>
+                                                  <button className="mr-btn mr-btn--primary" type="button" onClick={() => void submitDraft(reply)} disabled={draftSubmitting || draftUploading || (!draftBody.trim() && draftAttachments.length === 0)}>
+                                                    {draftSubmitting ? "保存中…" : "保存编辑"}
+                                                  </button>
+                                                </div>
+                                              </div>
+                                            </div>
+                                          ) : (
+                                            <>
+                                              <div className="mr-player-page__annotation-body mr-player-page__annotation-reply-copy">{reply.body || getReplyPrefix(annotation)}</div>
+                                              {reply.attachments.length > 0 ? (
+                                                <div className="mr-player-page__annotation-attachments mr-player-page__annotation-attachments--images">
+                                                  {reply.attachments.map((attachment, index) => (
+                                                    <button
+                                                      key={`${attachment.objectKey}-${index}`}
+                                                      type="button"
+                                                      className="mr-player-page__annotation-image-link"
+                                                      onClick={() => attachment.previewUrl ? openAttachmentModal(attachment.previewUrl) : undefined}
+                                                    >
+                                                      {attachment.previewUrl ? <img className="mr-player-page__annotation-image" src={attachment.previewUrl} alt="reply attachment" /> : null}
+                                                      <span className="mr-badge">{attachment.width && attachment.height ? `${attachment.width}×${attachment.height}` : "image"}</span>
+                                                    </button>
+                                                  ))}
+                                                </div>
+                                              ) : null}
+                                            </>
+                                          )}
                                         </div>
-                                        <div className="mr-player-page__annotation-actions mr-player-page__annotation-actions--reply">
-                                          <IconButton title="跳转到时间点" onClick={() => selectAnnotation(annotation)}>
-                                            <PlayerIcon>↗</PlayerIcon>
-                                          </IconButton>
-                                          <IconButton title="快速回复" onClick={() => openReplyDraft(annotation)}>
-                                            <PlayerIcon>↳</PlayerIcon>
-                                          </IconButton>
-                                          <IconButton title="复制内容" onClick={() => void navigator.clipboard?.writeText(reply.body || "")} disabled={!reply.body}>
-                                            <PlayerIcon>⧉</PlayerIcon>
-                                          </IconButton>
-                                        </div>
+                                        {!isReplyEditing ? (
+                                          <div className="mr-player-page__annotation-actions mr-player-page__annotation-actions--reply">
+                                            <IconButton title="跳转到时间点" onClick={() => selectAnnotation(reply)}>
+                                              <PlayerIcon>↗</PlayerIcon>
+                                            </IconButton>
+                                            <IconButton title="编辑回复" onClick={() => openEditDraft(reply)}>
+                                              <PlayerIcon>✎</PlayerIcon>
+                                            </IconButton>
+                                            <IconButton title="复制内容" onClick={() => void navigator.clipboard?.writeText(reply.body || "")} disabled={!reply.body}>
+                                              <PlayerIcon>⧉</PlayerIcon>
+                                            </IconButton>
+                                            <IconButton title="删除回复" onClick={() => setDeleteTarget(reply)}>
+                                              <PlayerIcon>🗑</PlayerIcon>
+                                            </IconButton>
+                                          </div>
+                                        ) : null}
                                       </div>
                                     );
                                   })}
+                                  {showReplyDraft ? (
+                                    <div className="mr-player-page__annotation-reply mr-player-page__annotation-reply--draft">
+                                      <span className="mr-player-page__annotation-avatar mr-player-page__annotation-avatar--reply">回</span>
+                                      <div className="mr-player-page__annotation-reply-body">
+                                        <div className="mr-player-page__annotation-author-row">
+                                          <strong>新回复</strong>
+                                          <span className="mr-badge">{formatClock(annotation.timestampMs / 1000)}</span>
+                                        </div>
+                                        <textarea
+                                          className="mr-input mr-player-page__annotation-edit-textarea mr-player-page__textarea"
+                                          value={draftBody}
+                                          onChange={(event) => setDraftBody(event.target.value)}
+                                          onPaste={(event) => void handleEditorPaste(event, "draft")}
+                                          placeholder={getReplyPrefix(annotation)}
+                                        />
+                                        {draftAttachments.length > 0 ? (
+                                          <div className="mr-player-page__attachment-grid">
+                                            {draftAttachments.map((attachment, index) => (
+                                              <figure key={`${attachment.objectKey || attachment.localUrl || index}-${index}`} className="mr-player-page__attachment-card">
+                                                {attachment.previewUrl ? (
+                                                  <button type="button" className="mr-player-page__annotation-image-link" onClick={() => openAttachmentModal(attachment.previewUrl!)}>
+                                                    <img className="mr-player-page__attachment-image" src={attachment.previewUrl} alt="reply attachment" />
+                                                    <figcaption className="mr-player-page__attachment-caption">{attachment.width && attachment.height ? `${attachment.width}×${attachment.height}` : "image"}</figcaption>
+                                                  </button>
+                                                ) : (
+                                                  <div className="mr-player-page__attachment-fallback">图片</div>
+                                                )}
+                                                <button
+                                                  className="mr-player-page__attachment-remove mr-player-page__attachment-remove--floating"
+                                                  type="button"
+                                                  onClick={() => {
+                                                    setDraftAttachments((prev) => {
+                                                      const target = prev[index];
+                                                      if (target?.localUrl) URL.revokeObjectURL(target.localUrl);
+                                                      return prev.filter((_, itemIndex) => itemIndex !== index);
+                                                    });
+                                                  }}
+                                                >
+                                                  ×
+                                                </button>
+                                              </figure>
+                                            ))}
+                                          </div>
+                                        ) : null}
+                                        <div className="mr-player-page__annotation-edit-tools">
+                                          <div className="mr-player-page__swatches">
+                                            {COLOR_PRESETS.map((swatch) => (
+                                              <button
+                                                key={swatch}
+                                                type="button"
+                                                className={`mr-player-page__swatch${draftColor === swatch ? " mr-player-page__swatch--active" : ""}`}
+                                                style={{ background: swatch }}
+                                                onClick={() => setDraftColor(swatch)}
+                                                aria-label={`颜色 ${swatch}`}
+                                              />
+                                            ))}
+                                          </div>
+                                          <div className="mr-player-page__annotation-edit-tools-right">
+                                            <button className="mr-btn" type="button" onClick={() => triggerAttachmentPicker("draft")}>{draftUploading ? "上传图片中…" : "插入图片"}</button>
+                                            <button className="mr-btn" type="button" onClick={cancelDraft} disabled={draftSubmitting || draftUploading}>取消</button>
+                                            <button className="mr-btn mr-btn--primary" type="button" onClick={() => void submitDraft(annotation)} disabled={draftSubmitting || draftUploading || (!draftBody.trim() && draftAttachments.length === 0)}>
+                                              {draftSubmitting ? "保存中…" : "保存回复"}
+                                            </button>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  ) : null}
                                 </div>
                               ) : null}
                             </>
                           )}
                         </div>
-                        {annotation.attachments.length > 0 ? (
-                          <div className="mr-player-page__annotation-attachments mr-player-page__annotation-attachments--images">
-                            {annotation.attachments.map((attachment, index) => (
-                              <button
-                                key={`${attachment.objectKey}-${index}`}
-                                type="button"
-                                className="mr-player-page__annotation-image-link"
-                                onClick={() => attachment.previewUrl ? openAttachmentModal(attachment.previewUrl) : undefined}
-                              >
-                                {attachment.previewUrl ? <img className="mr-player-page__annotation-image" src={attachment.previewUrl} alt="annotation attachment" /> : null}
-                                <span className="mr-badge">{attachment.width && attachment.height ? `${attachment.width}×${attachment.height}` : "image"}</span>
-                              </button>
-                            ))}
+                        {!isEditing ? (
+                          <div className="mr-player-page__annotation-actions">
+                            <IconButton title="跳转到时间点" onClick={() => selectAnnotation(annotation)}>
+                              <PlayerIcon>↗</PlayerIcon>
+                            </IconButton>
+                            <IconButton title="编辑标注" onClick={() => openEditDraft(annotation)}>
+                              <PlayerIcon>✎</PlayerIcon>
+                            </IconButton>
+                            <IconButton title="回复标注" onClick={() => openReplyDraft(annotation)}>
+                              <PlayerIcon>↳</PlayerIcon>
+                            </IconButton>
+                            <IconButton title="复制内容" onClick={() => void navigator.clipboard?.writeText(annotation.body || "")} disabled={!annotation.body}>
+                              <PlayerIcon>⧉</PlayerIcon>
+                            </IconButton>
+                            <IconButton title="删除标注" onClick={() => setDeleteTarget(annotation)}>
+                              <PlayerIcon>🗑</PlayerIcon>
+                            </IconButton>
                           </div>
                         ) : null}
-                        <div className="mr-player-page__annotation-actions">
-                          <IconButton title="跳转到时间点" onClick={() => selectAnnotation(annotation)}>
-                            <PlayerIcon>↗</PlayerIcon>
-                          </IconButton>
-                          <IconButton title="编辑标注" onClick={() => editAnnotation(annotation)}>
-                            <PlayerIcon>✎</PlayerIcon>
-                          </IconButton>
-                          <IconButton title="快速回复" onClick={() => openReplyDraft(annotation)}>
-                            <PlayerIcon>↳</PlayerIcon>
-                          </IconButton>
-                          <IconButton title="创建楼中回复" onClick={() => void createReply(annotation)}>
-                            <PlayerIcon>＋</PlayerIcon>
-                          </IconButton>
-                          <IconButton title="复制内容" onClick={() => void navigator.clipboard?.writeText(annotation.body || "") } disabled={!annotation.body}>
-                            <PlayerIcon>⧉</PlayerIcon>
-                          </IconButton>
-                          <IconButton title="删除标注" onClick={() => setDeleteTarget(annotation)}>
-                            <PlayerIcon>🗑</PlayerIcon>
-                          </IconButton>
-                        </div>
                       </article>
                     );
                   })}
@@ -1396,6 +1744,78 @@ function PlayerPageInner() {
           </div>
         </div>
       ) : null}
+      <Dialog
+        open={showShortcutDialog}
+        title="播放器快捷键"
+        description="这些快捷键只在焦点不在输入框内时生效。"
+        onClose={() => setShowShortcutDialog(false)}
+        footer={
+          <button type="button" className="mr-btn mr-btn--primary" onClick={() => setShowShortcutDialog(false)}>
+            知道了
+          </button>
+        }
+      >
+        <div className="mr-dialog__stack">
+          <div className="mr-player-page__dialog-option-list">
+            <div className="mr-player-page__dialog-option">
+              <div>
+                <strong>空格</strong>
+                <p>播放 / 暂停视频。</p>
+              </div>
+            </div>
+            <div className="mr-player-page__dialog-option">
+              <div>
+                <strong>← / →</strong>
+                <p>后退或前进 5 秒。</p>
+              </div>
+            </div>
+            <div className="mr-player-page__dialog-option">
+              <div>
+                <strong>F</strong>
+                <p>进入或退出全屏。</p>
+              </div>
+            </div>
+            <div className="mr-player-page__dialog-option">
+              <div>
+                <strong>M</strong>
+                <p>静音或恢复声音。</p>
+              </div>
+            </div>
+          </div>
+          <div className="mr-dialog__note">输入标注正文时，快捷键会自动让位给文本输入，不会抢焦点。</div>
+        </div>
+      </Dialog>
+      <Dialog
+        open={showTimeDisplayDialog}
+        title="选择时间显示方式"
+        description="切换顶部时间标签和播放器时间读数。"
+        onClose={() => setShowTimeDisplayDialog(false)}
+        footer={
+          <button type="button" className="mr-btn mr-btn--primary" onClick={() => setShowTimeDisplayDialog(false)}>
+            完成
+          </button>
+        }
+      >
+        <div className="mr-player-page__dialog-option-list">
+          {TIME_DISPLAY_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`mr-player-page__dialog-option${timeDisplayMode === option.value ? " mr-player-page__dialog-option--active" : ""}`}
+              onClick={() => {
+                setTimeDisplayMode(option.value);
+                setShowTimeDisplayDialog(false);
+              }}
+            >
+              <div>
+                <strong>{option.label}</strong>
+                <p>{option.description}</p>
+              </div>
+              <span className="mr-badge">{timeDisplayMode === option.value ? "当前" : "可选"}</span>
+            </button>
+          ))}
+        </div>
+      </Dialog>
       <Dialog
         open={Boolean(deleteTarget)}
         title="删除标注"

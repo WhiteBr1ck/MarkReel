@@ -2,10 +2,16 @@ import { Queue, type ConnectionOptions } from "bullmq";
 import IORedis from "ioredis";
 import { env } from "./env";
 
+export type MediaTranscode = {
+  resolution?: "1080p" | "720p";
+  fps?: "source" | 24 | 25 | 30 | 60;
+};
+
 export type MediaJob = {
   mediaId: string;
   originalObjectKey: string;
   mode: "original" | "compress";
+  transcode?: MediaTranscode;
 };
 
 export const mediaQueue = (() => {
