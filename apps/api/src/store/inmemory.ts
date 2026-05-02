@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Store, StoreProject, StoreUser } from "./types";
+import type { Store, StoreProject, StoreUser, StoreUserProfile } from "./types";
 
 const usersById = new Map<string, StoreUser>();
 const usersByUsername = new Map<string, string>();
@@ -8,6 +8,19 @@ const membershipsByUserId = new Map<string, Set<string>>();
 
 function now() {
   return new Date();
+}
+
+function toProfile(user: StoreUser): StoreUserProfile {
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    avatarObjectKey: user.avatarObjectKey,
+    avatarContentType: user.avatarContentType,
+    globalRole: user.globalRole,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt
+  };
 }
 
 function ensureMembership(userId: string, projectId: string) {
@@ -26,18 +39,15 @@ export function createInMemoryStore(): Store {
     async userFindByUsername(username) {
       const id = usersByUsername.get(username.toLowerCase());
       if (!id) return null;
-      return usersById.get(id) ?? null;
+      const user = usersById.get(id) ?? null;
+      if (!user || user.deletedAt) return null;
+      return user;
     },
 
     async userFindById(id) {
-      const user = usersById.get(id);
-      if (!user) return null;
-      return {
-        id: user.id,
-        username: user.username,
-        displayName: user.displayName,
-        createdAt: user.createdAt
-      };
+      const user = usersById.get(id) ?? null;
+      if (!user || user.deletedAt) return null;
+      return user;
     },
 
     async userCreateOrRevive(args) {
@@ -47,30 +57,152 @@ export function createInMemoryStore(): Store {
         const existing = usersById.get(existingId)!;
         existing.passwordHash = args.passwordHash;
         existing.displayName = args.displayName;
-        return {
-          id: existing.id,
-          username: existing.username,
-          displayName: existing.displayName,
-          createdAt: existing.createdAt
-        };
+        existing.avatarObjectKey = null;
+        existing.avatarContentType = null;
+        existing.globalRole = args.globalRole ?? "user";
+        existing.sessionVersion = 1;
+        existing.updatedAt = now();
+        existing.deletedAt = null;
+        return existing;
       }
 
-      const id = randomUUID();
+      const t = now();
       const u: StoreUser = {
-        id,
+        id: randomUUID(),
         username: normalized,
         passwordHash: args.passwordHash,
         displayName: args.displayName,
-        createdAt: now()
+        avatarObjectKey: null,
+        avatarContentType: null,
+        globalRole: args.globalRole ?? "user",
+        sessionVersion: 1,
+        createdAt: t,
+        updatedAt: t,
+        deletedAt: null
       };
-      usersById.set(id, u);
-      usersByUsername.set(normalized, id);
-      return {
-        id: u.id,
-        username: u.username,
-        displayName: u.displayName,
-        createdAt: u.createdAt
+      usersById.set(u.id, u);
+      usersByUsername.set(normalized, u.id);
+      return u;
+    },
+
+    async userEnsureAdmin(args) {
+      const normalized = args.username.toLowerCase();
+      const existingId = usersByUsername.get(normalized);
+      if (existingId) {
+        const existing = usersById.get(existingId)!;
+        existing.globalRole = "admin";
+        existing.updatedAt = now();
+        existing.deletedAt = null;
+        return existing;
+      }
+
+      const t = now();
+      const user: StoreUser = {
+        id: randomUUID(),
+        username: normalized,
+        passwordHash: args.passwordHash,
+        displayName: args.displayName,
+        avatarObjectKey: null,
+        avatarContentType: null,
+        globalRole: "admin",
+        sessionVersion: 1,
+        createdAt: t,
+        updatedAt: t,
+        deletedAt: null
       };
+      usersById.set(user.id, user);
+      usersByUsername.set(normalized, user.id);
+      return user;
+    },
+
+    async userUpdateProfile(args) {
+      const user = usersById.get(args.userId) ?? null;
+      if (!user || user.deletedAt) return null;
+      user.displayName = args.displayName;
+      user.avatarObjectKey = args.avatarObjectKey;
+      user.avatarContentType = args.avatarContentType;
+      user.updatedAt = now();
+      return user;
+    },
+
+    async userChangePassword(args) {
+      const user = usersById.get(args.userId) ?? null;
+      if (!user || user.deletedAt) return null;
+      user.passwordHash = args.passwordHash;
+      user.sessionVersion = args.nextSessionVersion;
+      user.updatedAt = now();
+      return user;
+    },
+
+    async userList() {
+      return Array.from(usersById.values())
+        .filter((user) => !user.deletedAt)
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        .map((user) => toProfile(user));
+    },
+
+    async userCreateByAdmin(args) {
+      const normalized = args.username.toLowerCase();
+      const existingId = usersByUsername.get(normalized);
+      if (existingId) {
+        const existing = usersById.get(existingId)!;
+        if (!existing.deletedAt) {
+          throw new Error("username_taken");
+        }
+        existing.passwordHash = args.passwordHash;
+        existing.displayName = args.displayName;
+        existing.avatarObjectKey = null;
+        existing.avatarContentType = null;
+        existing.globalRole = args.globalRole ?? "user";
+        existing.sessionVersion = 1;
+        existing.updatedAt = now();
+        existing.deletedAt = null;
+        return existing;
+      }
+
+      const t = now();
+      const user: StoreUser = {
+        id: randomUUID(),
+        username: normalized,
+        passwordHash: args.passwordHash,
+        displayName: args.displayName,
+        avatarObjectKey: null,
+        avatarContentType: null,
+        globalRole: args.globalRole ?? "user",
+        sessionVersion: 1,
+        createdAt: t,
+        updatedAt: t,
+        deletedAt: null
+      };
+      usersById.set(user.id, user);
+      usersByUsername.set(normalized, user.id);
+      return user;
+    },
+
+    async adminUpdateUserProfile(args) {
+      const user = usersById.get(args.userId) ?? null;
+      if (!user || user.deletedAt) return null;
+      user.displayName = args.displayName;
+      user.updatedAt = now();
+      return user;
+    },
+
+    async adminResetUserPassword(args) {
+      const user = usersById.get(args.userId) ?? null;
+      if (!user || user.deletedAt) return null;
+      user.passwordHash = args.passwordHash;
+      user.sessionVersion = args.nextSessionVersion;
+      user.updatedAt = now();
+      return user;
+    },
+
+    async userSoftDelete(args) {
+      const user = usersById.get(args.userId) ?? null;
+      if (!user || user.deletedAt) return null;
+      user.deletedAt = now();
+      user.sessionVersion += 1;
+      user.updatedAt = now();
+      return user;
     },
 
     async projectListForUser(userId) {

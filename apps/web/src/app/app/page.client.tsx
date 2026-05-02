@@ -7,11 +7,16 @@ import { AppShell } from "./_components/shell";
 import type { FolderNode, Project, SortMode, UploadItem, UploadStage, ViewMode, WorkspaceItem } from "./_components/shell";
 import { Dialog, NameDialog } from "./_components/dialog";
 import { formatBytes, formatDuration } from "./_components/workspaceMock";
-import { IconFolder, IconSearch, IconSort, IconVideo } from "./_components/icons";
+import { IconChevron, IconFolder, IconSearch, IconSort, IconVideo } from "./_components/icons";
+import { useUiPreferences } from "./_components/theme";
 
-const APP_VERSION = "0.1.1";
-
-type ApiUser = { id: string; username: string; displayName: string | null };
+type ApiUser = {
+  id: string;
+  username: string;
+  displayName: string | null;
+  avatarUrl?: string | null;
+  globalRole?: "admin" | "user";
+};
 type WorkspaceResponse = {
   project: Project;
   activeFolderId: string;
@@ -84,6 +89,93 @@ type UploadDraft = {
   folderId: string;
 };
 
+type UploadMenuOption = {
+  value: string;
+  label: string;
+};
+
+type UploadMenuProps = {
+  value: string;
+  options: UploadMenuOption[];
+  disabled?: boolean;
+  onChange: (value: string) => void;
+};
+
+function UploadMenu({ value, options, disabled, onChange }: UploadMenuProps) {
+  const [open, setOpen] = useState(false);
+  const selected = options.find((option) => option.value === value) ?? options[0];
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  useEffect(() => {
+    function closeMenu() {
+      setOpen(false);
+    }
+    window.addEventListener("markreel:close-upload-menus", closeMenu);
+    return () => window.removeEventListener("markreel:close-upload-menus", closeMenu);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    function closeMenu() {
+      setOpen(false);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  function toggleOpen() {
+    if (!open) window.dispatchEvent(new Event("markreel:close-upload-menus"));
+    setOpen((current) => !current);
+  }
+
+  return (
+    <div className="mr-upload-dialog__menu" onClick={(event) => event.stopPropagation()}>
+      <button
+        className="mr-btn mr-btn--menu mr-upload-dialog__menu-trigger"
+        type="button"
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={toggleOpen}
+      >
+        <span>{selected?.label ?? "请选择"}</span>
+        <IconChevron size={16} dir="down" />
+      </button>
+      {open ? (
+        <div className="mr-panel mr-upload-dialog__menu-popover">
+          <div className="mr-upload-dialog__menu-list" role="listbox">
+            {options.map((option) => (
+              <button
+                key={option.value}
+                className={`mr-btn mr-btn--menu-item${option.value === value ? " mr-btn--menu-item-active" : ""}`}
+                type="button"
+                role="option"
+                aria-selected={option.value === value}
+                onClick={() => {
+                  onChange(option.value);
+                  setOpen(false);
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 type AnnotationListResponse = {
   annotations: AnnotationRecord[];
 };
@@ -103,8 +195,6 @@ type FeedbackState = {
   tone: FeedbackTone;
   message: string;
 };
-
-type OverlayState = "settings" | "about" | null;
 
 type ContextMenuState = {
   x: number;
@@ -320,6 +410,7 @@ type DialogState =
   | { type: "confirm_clear_trash"; projectId: string; projectName: string };
 
 export default function AppClient() {
+  const { preferences } = useUiPreferences();
   const [mode, setMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -336,7 +427,6 @@ export default function AppClient() {
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [previewBusy, setPreviewBusy] = useState(false);
   const [feedback, setFeedback] = useState<FeedbackState | null>(null);
-  const [overlay, setOverlay] = useState<OverlayState>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [trashItems, setTrashItems] = useState<TrashItem[]>([]);
@@ -363,7 +453,8 @@ export default function AppClient() {
   const sortRaw = sp.get("sort");
   const sort: SortMode = sortRaw === "name_asc" || sortRaw === "name_desc" ? sortRaw : "updated_desc";
   const q = sp.get("q") || "";
-  const inspectorPaneOpen = (sp.get("panel") ?? sp.get("inspector") ?? "1") !== "0";
+  const panelParam = sp.get("panel") ?? sp.get("inspector");
+  const inspectorPaneOpen = panelParam ? panelParam !== "0" : preferences.defaultInspectorOpen;
   const selectionMode = (sp.get("select") ?? "0") === "1";
   const scope = sp.get("scope") === "trash" ? "trash" : "workspace";
   const sel = sp.get("sel") || "";
@@ -1540,70 +1631,65 @@ export default function AppClient() {
           </label>
 
           <div className="mr-upload-dialog__grid">
-            <label className="mr-field">
+            <div className="mr-field">
               <span className="mr-field__label">上传模式</span>
-              <select
-                className="mr-input mr-upload-dialog__select"
+              <UploadMenu
                 value={uploadDraft?.mode ?? "compress"}
-                onChange={(e) => setUploadDraft((prev) => (prev ? { ...prev, mode: e.target.value as UploadMode } : prev))}
-              >
-                <option value="compress">压缩上传</option>
-                <option value="original">原始上传</option>
-              </select>
-            </label>
+                options={[
+                  { value: "compress", label: "压缩上传" },
+                  { value: "original", label: "原始上传" }
+                ]}
+                onChange={(value) => setUploadDraft((prev) => (prev ? { ...prev, mode: value as UploadMode } : prev))}
+              />
+            </div>
 
-            <label className="mr-field">
+            <div className="mr-field">
               <span className="mr-field__label">上传目标路径</span>
-              <select
-                className="mr-input mr-upload-dialog__select"
+              <UploadMenu
                 value={uploadDraft?.folderId ?? rootFid ?? ""}
-                onChange={(e) => setUploadDraft((prev) => (prev ? { ...prev, folderId: e.target.value } : prev))}
-              >
-                {folderOptions.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+                options={folderOptions.map((option) => ({ value: option.id, label: option.label }))}
+                onChange={(value) => setUploadDraft((prev) => (prev ? { ...prev, folderId: value } : prev))}
+              />
+            </div>
           </div>
 
           <div className={`mr-upload-dialog__grid${uploadDraft?.mode === "compress" ? "" : " mr-upload-dialog__grid--disabled"}`}>
-            <label className="mr-field">
+            <div className="mr-field">
               <span className="mr-field__label">压缩分辨率</span>
-              <select
-                className="mr-input mr-upload-dialog__select"
+              <UploadMenu
                 value={uploadDraft?.targetResolution ?? "1080p"}
                 disabled={uploadDraft?.mode !== "compress"}
-                onChange={(e) => setUploadDraft((prev) => (prev ? { ...prev, targetResolution: e.target.value as UploadResolution } : prev))}
-              >
-                <option value="1080p">1080P</option>
-                <option value="720p">720P</option>
-              </select>
-            </label>
+                options={[
+                  { value: "1080p", label: "1080P" },
+                  { value: "720p", label: "720P" }
+                ]}
+                onChange={(value) => setUploadDraft((prev) => (prev ? { ...prev, targetResolution: value as UploadResolution } : prev))}
+              />
+            </div>
 
-            <label className="mr-field">
+            <div className="mr-field">
               <span className="mr-field__label">压缩帧率</span>
-              <select
-                className="mr-input mr-upload-dialog__select"
+              <UploadMenu
                 value={String(uploadDraft?.targetFps ?? 30)}
                 disabled={uploadDraft?.mode !== "compress"}
-                onChange={(e) => setUploadDraft((prev) => {
-                  if (!prev) return prev;
-                  const value = e.target.value;
-                  return {
-                    ...prev,
-                    targetFps: value === "source" ? "source" : Number(value) as UploadFps
-                  };
-                })}
-              >
-                <option value="source">保持原帧率</option>
-                <option value="24">24 FPS</option>
-                <option value="25">25 FPS</option>
-                <option value="30">30 FPS</option>
-                <option value="60">60 FPS</option>
-              </select>
-            </label>
+                options={[
+                  { value: "source", label: "保持原帧率" },
+                  { value: "24", label: "24 FPS" },
+                  { value: "25", label: "25 FPS" },
+                  { value: "30", label: "30 FPS" },
+                  { value: "60", label: "60 FPS" }
+                ]}
+                onChange={(value) => {
+                  setUploadDraft((prev) => {
+                    if (!prev) return prev;
+                    return {
+                      ...prev,
+                      targetFps: value === "source" ? "source" : (Number(value) as UploadFps)
+                    };
+                  });
+                }}
+              />
+            </div>
           </div>
 
           {uploadDraft?.mode === "original" ? (
@@ -1611,50 +1697,6 @@ export default function AppClient() {
               原始上传会保留原始文件，分辨率与帧率选项不会生效。
             </div>
           ) : null}
-        </div>
-      </Dialog>
-
-      <Dialog
-        open={overlay === "settings"}
-        title="设置"
-        description="调整当前工作台的主题与界面偏好。"
-        onClose={() => setOverlay(null)}
-      >
-        <div style={{ display: "grid", gap: 14 }}>
-          <div className="mr-panel" style={{ padding: 14, boxShadow: "none", background: "var(--panel3)" }}>
-            <div style={{ fontWeight: 800 }}>界面主题</div>
-            <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 13, lineHeight: 1.6 }}>
-              深浅色切换按钮仍保留在左侧导航底部，这里主要作为集中入口，后续可以继续放工作台偏好项。
-            </div>
-          </div>
-              {user ? (
-                <div className="mr-panel" style={{ padding: 14, boxShadow: "none", background: "var(--panel3)" }}>
-                  <div style={{ fontWeight: 800 }}>当前账号</div>
-                  <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 13 }}>
-                    {user.displayName ?? user.username}
-                  </div>
-                </div>
-              ) : null}
-        </div>
-      </Dialog>
-
-      <Dialog
-        open={overlay === "about"}
-        title="关于 MarkReel"
-        description="本地优先的视频审阅工作台。"
-        onClose={() => setOverlay(null)}
-      >
-        <div style={{ display: "grid", gap: 12, lineHeight: 1.7, color: "var(--muted)" }}>
-          <div>
-            <strong style={{ color: "var(--text)" }}>版本</strong>
-            <div style={{ marginTop: 4 }}>MarkReel {APP_VERSION}</div>
-          </div>
-          <div>
-            MarkReel 是一个开源、自托管的视频审阅与标注工具，当前优先把上传、预览、逐帧查看和批注主路径做顺。
-          </div>
-          <div>
-            现在这套工作台已经切到真实账号、真实本地持久化和真实上传链路，后续继续围绕交互和媒体能力细化。
-          </div>
         </div>
       </Dialog>
 
@@ -1719,9 +1761,12 @@ export default function AppClient() {
             if (!effectivePid) return;
             setQuery({ pid: effectivePid, fid: `root-${effectivePid}`, scope: null, q: null, sel: null });
           }}
-          onGoSettings={() => setOverlay("settings")}
-          onGoAbout={() => setOverlay("about")}
+          onGoSettings={() => router.push("/app/settings")}
+          onGoUserSettings={() => router.push("/app/user-settings")}
+          onGoAdminSettings={user.globalRole === "admin" ? () => router.push("/app/admin") : undefined}
+          onGoAbout={() => router.push("/app/about")}
           uploads={uploads}
+          showUploads={preferences.showUploadQueue}
           left={
             <>
               <div className="mr-side-section">
@@ -2276,7 +2321,7 @@ export default function AppClient() {
             <div style={{ display: "grid", gap: 10 }}>
               <div className={`mr-inspector-panel${inspectorPaneOpen ? "" : " mr-inspector-panel--collapsed"}`}>
                 <div className="mr-inspector-panel__head">
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>项目信息</div>
+                  {inspectorPaneOpen ? <div className="mr-inspector-panel__title">项目信息</div> : null}
                   <button
                     className="mr-btn mr-btn--surface mr-inspector-toggle"
                     type="button"
@@ -2284,7 +2329,7 @@ export default function AppClient() {
                     aria-label={inspectorPaneOpen ? "收起项目信息" : "展开项目信息"}
                     onClick={() => setQuery({ panel: inspectorPaneOpen ? "0" : "1" })}
                   >
-                    <span aria-hidden="true">ⓘ</span>
+                    <IconChevron size={18} dir={inspectorPaneOpen ? "right" : "left"} />
                   </button>
                 </div>
                 {inspectorPaneOpen ? (
@@ -2324,9 +2369,7 @@ export default function AppClient() {
                   ) : (
                     <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 13, lineHeight: 1.6 }}>选择一个项目后，这里会显示项目级信息。</div>
                   )
-                ) : (
-                  <div className="mr-inspector-panel__collapsed-note">点击图标查看项目信息</div>
-                )}
+                ) : null}
               </div>
 
               {inspectorPaneOpen ? (

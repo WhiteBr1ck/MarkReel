@@ -1,17 +1,62 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { ACCESS_COOKIE } from "./tokens";
+import { getStore } from "../store";
+import { ACCESS_COOKIE, clearAuthCookies, parseAuthTokenPayload, serverInstanceId } from "./tokens";
+import type { UserGlobalRole } from "../store/types";
+
+export type CurrentUser = {
+  id: string;
+  username: string;
+  displayName: string | null;
+  avatarObjectKey: string | null;
+  avatarContentType: string | null;
+  globalRole: UserGlobalRole;
+  createdAt: Date;
+};
 
 export async function requireUser(req: FastifyRequest, reply: FastifyReply) {
   try {
-    const payload = await (req as any).jwtVerify({ cookie: { cookieName: ACCESS_COOKIE } });
-    (req as any).user = { id: payload.sub as string };
+    const rawPayload = await (req as any).jwtVerify({ cookie: { cookieName: ACCESS_COOKIE } });
+    const payload = parseAuthTokenPayload(rawPayload);
+    if (!payload || payload.si !== serverInstanceId) {
+      clearAuthCookies(reply);
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+
+    const user = await getStore().userFindById(payload.sub);
+    if (!user || user.sessionVersion !== payload.sv) {
+      clearAuthCookies(reply);
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+
+    (req as any).user = {
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      avatarObjectKey: user.avatarObjectKey,
+      avatarContentType: user.avatarContentType,
+      globalRole: user.globalRole,
+      createdAt: user.createdAt
+    } satisfies CurrentUser;
   } catch {
+    clearAuthCookies(reply);
     return reply.code(401).send({ error: "unauthorized" });
   }
 }
 
-export function getUserId(req: FastifyRequest): string {
-  const user = (req as any).user;
+export async function requireAdmin(req: FastifyRequest, reply: FastifyReply) {
+  const result = await requireUser(req, reply);
+  if (reply.sent) return result;
+  if (getCurrentUser(req).globalRole !== "admin") {
+    return reply.code(403).send({ error: "forbidden" });
+  }
+}
+
+export function getCurrentUser(req: FastifyRequest): CurrentUser {
+  const user = (req as any).user as CurrentUser | undefined;
   if (!user?.id) throw new Error("missing_user");
-  return user.id;
+  return user;
+}
+
+export function getUserId(req: FastifyRequest): string {
+  return getCurrentUser(req).id;
 }

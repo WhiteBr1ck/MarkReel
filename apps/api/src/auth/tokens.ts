@@ -1,8 +1,16 @@
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { env } from "../env";
 
 export const ACCESS_COOKIE = "mr_access";
 export const REFRESH_COOKIE = "mr_refresh";
+export const serverInstanceId = randomUUID();
+
+export type AuthTokenPayload = {
+  sub: string;
+  sv: number;
+  si: string;
+};
 
 export async function registerJwt(app: FastifyInstance) {
   await app.register(import("@fastify/jwt"), {
@@ -14,11 +22,30 @@ export async function registerJwt(app: FastifyInstance) {
   });
 }
 
-export async function setAuthCookies(reply: any, payload: { sub: string }) {
-  const accessToken = await reply.jwtSign(payload, {
+export function parseAuthTokenPayload(payload: unknown): AuthTokenPayload | null {
+  if (!payload || typeof payload !== "object") return null;
+  const value = payload as Record<string, unknown>;
+  if (typeof value.sub !== "string") return null;
+  if (typeof value.sv !== "number" || !Number.isInteger(value.sv)) return null;
+  if (typeof value.si !== "string") return null;
+  return {
+    sub: value.sub,
+    sv: value.sv,
+    si: value.si
+  };
+}
+
+export async function setAuthCookies(reply: any, payload: { userId: string; sessionVersion: number }) {
+  const tokenPayload: AuthTokenPayload = {
+    sub: payload.userId,
+    sv: payload.sessionVersion,
+    si: serverInstanceId
+  };
+
+  const accessToken = await reply.jwtSign(tokenPayload, {
     expiresIn: env.JWT_ACCESS_TTL_SECONDS
   });
-  const refreshToken = await reply.jwtSign(payload, {
+  const refreshToken = await reply.jwtSign(tokenPayload, {
     expiresIn: env.JWT_REFRESH_TTL_SECONDS,
     secret: env.JWT_REFRESH_SECRET
   });
@@ -27,13 +54,15 @@ export async function setAuthCookies(reply: any, payload: { sub: string }) {
     httpOnly: true,
     sameSite: "lax",
     path: "/",
-    secure: false
+    secure: false,
+    maxAge: env.JWT_ACCESS_TTL_SECONDS
   });
   reply.setCookie(REFRESH_COOKIE, refreshToken, {
     httpOnly: true,
     sameSite: "lax",
     path: "/api/auth/refresh",
-    secure: false
+    secure: false,
+    maxAge: env.JWT_REFRESH_TTL_SECONDS
   });
 }
 

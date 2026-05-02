@@ -23,7 +23,17 @@ const EnvSchema = z.object({
   JWT_ACCESS_SECRET: z.string().min(16).default("dev_access_secret_change_me_123456"),
   JWT_REFRESH_SECRET: z.string().min(16).default("dev_refresh_secret_change_me_123456"),
   JWT_ACCESS_TTL_SECONDS: z.coerce.number().int().positive().default(900),
-  JWT_REFRESH_TTL_SECONDS: z.coerce.number().int().positive().default(2592000),
+  JWT_REFRESH_TTL_SECONDS: z.coerce.number().int().positive().default(604800),
+
+  MARKREEL_ADMIN_USERNAME: z
+    .string()
+    .trim()
+    .min(3)
+    .max(32)
+    .regex(/^[a-zA-Z0-9_\-.]+$/)
+    .optional(),
+  MARKREEL_ADMIN_PASSWORD: z.string().min(8).max(200).optional(),
+  MARKREEL_ADMIN_DISPLAY_NAME: z.string().trim().min(1).max(80).optional(),
 
   DATABASE_URL: z.string().min(1).optional(),
   // Optional for local-only dev. If unset, background job queue is disabled.
@@ -45,6 +55,10 @@ const parsed = EnvSchema.parse(process.env);
 
 if (parsed.MARKREEL_STORE === "sqlite" && !parsed.DATABASE_URL) {
   throw new Error("DATABASE_URL is required when MARKREEL_STORE=sqlite");
+}
+
+if (Boolean(parsed.MARKREEL_ADMIN_USERNAME) !== Boolean(parsed.MARKREEL_ADMIN_PASSWORD)) {
+  throw new Error("MARKREEL_ADMIN_USERNAME and MARKREEL_ADMIN_PASSWORD must be set together");
 }
 
 export const env = parsed;

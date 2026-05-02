@@ -3,15 +3,22 @@
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import {
+  IconAutoTheme,
   IconFolder,
   IconInfo,
   IconMoon,
   IconSettings,
   IconSun
 } from "./icons";
-import { useTheme } from "./theme";
+import { type Theme, useTheme, useUiPreferences } from "./theme";
 
-export type ApiUser = { id: string; username: string; displayName: string | null };
+export type ApiUser = {
+  id: string;
+  username: string;
+  displayName: string | null;
+  avatarUrl?: string | null;
+  globalRole?: "admin" | "user";
+};
 export type Project = { id: string; name: string; ownerId: string; createdAt: string; updatedAt: string };
 
 export type FolderNode = {
@@ -67,17 +74,20 @@ type Props = {
 
   onGoProjectHome: () => void;
   onGoSettings: () => void;
+  onGoUserSettings: () => void;
+  onGoAdminSettings?: () => void;
   onGoAbout: () => void;
 
   uploads?: UploadItem[];
+  showUploads?: boolean;
   left: ReactNode;
   center: ReactNode;
   right: ReactNode;
 };
 
-function Avatar({ name }: { name: string }) {
+function Avatar({ name, src, label }: { name: string; src?: string | null; label: string }) {
   const initial = (name.trim()[0] ?? "U").toUpperCase();
-  return <div className="mr-shell__avatar" aria-label="用户">{initial}</div>;
+  return src ? <img className="mr-shell__avatar-image" src={src} alt={label} /> : <div className="mr-shell__avatar" aria-label={label}>{initial}</div>;
 }
 
 function PrimaryNav({
@@ -89,11 +99,22 @@ function PrimaryNav({
   onGoSettings: () => void;
   onGoAbout: () => void;
 }) {
-  const { theme, toggle } = useTheme();
+  const { theme, resolvedTheme, setTheme } = useTheme();
+  const { labels } = useUiPreferences();
+  const themeLabelMap: Record<Theme, string> = {
+    dark: labels.common.dark,
+    light: labels.common.light,
+    system: labels.common.system
+  };
+  const nextTheme: Theme = theme === "dark" ? "light" : theme === "light" ? "system" : "dark";
+  const themeLabel = themeLabelMap[theme];
+  const resolvedThemeLabel = themeLabelMap[resolvedTheme];
+  const themeTitle = theme === "system" ? `${themeLabel} (${resolvedThemeLabel})` : themeLabel;
+  const themeIcon = theme === "dark" ? <IconMoon size={20} /> : theme === "light" ? <IconSun size={20} /> : <IconAutoTheme size={20} />;
 
   function NavButton({ title, onClick, children }: { title: string; onClick: () => void; children: ReactNode }) {
     return (
-      <button className="mr-btn mr-shell__nav-button" onClick={onClick} title={title} type="button">
+      <button className="mr-btn mr-shell__nav-button" onClick={onClick} title={title} aria-label={title} type="button">
         {children}
       </button>
     );
@@ -106,22 +127,26 @@ function PrimaryNav({
       </div>
 
       <div className="mr-shell__nav-group">
-        <NavButton title="项目首页" onClick={onGoProjectHome}>
+        <NavButton title={labels.shell.navProjects} onClick={onGoProjectHome}>
           <IconFolder size={20} />
         </NavButton>
-        <NavButton title="设置" onClick={onGoSettings}>
+        <NavButton title={labels.shell.navSettings} onClick={onGoSettings}>
           <IconSettings size={20} />
         </NavButton>
-        <NavButton title="关于" onClick={onGoAbout}>
+        <NavButton title={labels.shell.navAbout} onClick={onGoAbout}>
           <IconInfo size={20} />
         </NavButton>
       </div>
 
       <div className="mr-shell__nav-spacer" />
 
-      <NavButton title="深浅色切换" onClick={() => toggle()}>
-        {theme === "dark" ? <IconSun size={20} /> : <IconMoon size={20} />}
-      </NavButton>
+      <div className="mr-shell__theme-control">
+        <NavButton title={themeTitle} onClick={() => setTheme(nextTheme)}>
+          <span className="mr-shell__theme-button-icon" aria-hidden="true">
+            {themeIcon}
+          </span>
+        </NavButton>
+      </div>
     </aside>
   );
 }
@@ -149,6 +174,7 @@ function UploadPanel({
   onOpenItem: (mediaId: string) => void;
   onLocateItem: (mediaId: string) => void;
 }) {
+  const { labels } = useUiPreferences();
   const activeCount = useMemo(() => uploads.filter((item) => item.stage !== "ready" && item.stage !== "error").length, [uploads]);
 
   if (uploads.length === 0) return null;
@@ -158,14 +184,14 @@ function UploadPanel({
       <div className="mr-panel mr-shell__uploads-card">
         <div className="mr-shell__uploads-head">
           <div>
-            <div className="mr-shell__uploads-title">Upload queue</div>
-            <div className="mr-shell__uploads-subtitle">上传与处理进度</div>
+            <div className="mr-shell__uploads-title">{labels.shell.uploadsKicker}</div>
+            <div className="mr-shell__uploads-subtitle">{labels.shell.uploadsTitle}</div>
           </div>
           <div className="mr-shell__uploads-actions">
-            <span className="mr-badge mr-badge--accent">{uploads.length} 项任务</span>
-            {activeCount > 0 ? <span className="mr-badge">{activeCount} 进行中</span> : null}
+            <span className="mr-badge mr-badge--accent">{uploads.length} {labels.shell.uploadTasks}</span>
+            {activeCount > 0 ? <span className="mr-badge">{activeCount} {labels.shell.uploadActive}</span> : null}
             <button className="mr-btn" type="button" onClick={onClear}>
-              清空记录
+              {labels.shell.clearUploads}
             </button>
           </div>
         </div>
@@ -225,15 +251,18 @@ function UploadPanel({
 
 function Topbar({
   title,
-  userName,
+  user,
   onLogout,
-  onGoSettings
+  onGoUserSettings,
+  onGoAdminSettings
 }: {
   title: string;
-  userName: string;
+  user: ApiUser;
   onLogout: () => void;
-  onGoSettings: () => void;
+  onGoUserSettings: () => void;
+  onGoAdminSettings?: () => void;
 }) {
+  const { labels } = useUiPreferences();
   const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
@@ -247,32 +276,40 @@ function Topbar({
     return () => document.removeEventListener("mousedown", onDoc);
   }, []);
 
+  const userName = user.displayName ?? user.username;
+  const isAdmin = user.globalRole === "admin";
+
   return (
     <header className="mr-shell__topbar">
       <div className="mr-panel mr-shell__topbar-card">
         <div className="mr-shell__topbar-row">
           <div className="mr-shell__title-wrap">
-            <div className="mr-shell__kicker">Workbench</div>
+            <div className="mr-shell__kicker">{labels.shell.topbarKicker}</div>
             <div className="mr-shell__title">{title}</div>
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <button type="button" onClick={() => setMenuOpen((s) => !s)} className="mr-shell__user-button" title="用户">
-              <Avatar name={userName} />
+            <button type="button" onClick={() => setMenuOpen((s) => !s)} className="mr-shell__user-button" title={labels.shell.userAriaLabel}>
+              <Avatar name={userName} src={user.avatarUrl} label={labels.shell.userAriaLabel} />
             </button>
           </div>
         </div>
 
         {menuOpen ? (
           <div className="mr-panel mr-shell__menu" data-mr-menu>
-            <div className="mr-shell__menu-label">当前用户</div>
+            <div className="mr-shell__menu-label">{labels.shell.userMenuLabel}</div>
             <div className="mr-shell__menu-name">{userName}</div>
             <div className="mr-shell__menu-actions">
-              <button className="mr-btn" style={{ width: "100%" }} onClick={onGoSettings}>
-                用户设置
+              <button className="mr-btn" style={{ width: "100%" }} onClick={onGoUserSettings}>
+                {labels.shell.userSettings}
               </button>
+              {isAdmin && onGoAdminSettings ? (
+                <button className="mr-btn" style={{ width: "100%" }} onClick={onGoAdminSettings}>
+                  {labels.shell.adminSettings}
+                </button>
+              ) : null}
               <button className="mr-btn mr-btn--danger" style={{ width: "100%" }} onClick={onLogout}>
-                退出登录
+                {labels.shell.logout}
               </button>
             </div>
           </div>
@@ -283,24 +320,29 @@ function Topbar({
 }
 
 export function AppShell(props: Props) {
+  const { labels } = useUiPreferences();
+
   return (
     <div className="mr-shell">
       <PrimaryNav onGoProjectHome={props.onGoProjectHome} onGoSettings={props.onGoSettings} onGoAbout={props.onGoAbout} />
 
       <main className="mr-shell__main">
         <Topbar
-          title="项目工作台"
-          userName={props.user.displayName ?? props.user.username}
+          title={labels.shell.topbarTitle}
+          user={props.user}
           onLogout={props.onLogout}
-          onGoSettings={props.onGoSettings}
+          onGoUserSettings={props.onGoUserSettings}
+          onGoAdminSettings={props.onGoAdminSettings}
         />
 
-        <UploadPanel
-          uploads={props.uploads ?? []}
-          onClear={props.onClearUploads}
-          onOpenItem={props.onOpenUploadItem}
-          onLocateItem={props.onLocateUploadItem}
-        />
+        {props.showUploads === false ? null : (
+          <UploadPanel
+            uploads={props.uploads ?? []}
+            onClear={props.onClearUploads}
+            onOpenItem={props.onOpenUploadItem}
+            onLocateItem={props.onLocateUploadItem}
+          />
+        )}
 
         <div className="mr-shell__body">
           <aside className="mr-shell__sidebar">{props.left}</aside>

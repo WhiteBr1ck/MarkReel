@@ -1,37 +1,301 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-export type Theme = "dark" | "light";
+export type Theme = "dark" | "light" | "system";
+export type Accent = "clay" | "blue" | "green" | "violet" | "amber";
+export type Language = "zh-CN" | "en";
+
+type ResolvedTheme = "dark" | "light";
+
+export type UiPreferences = {
+  theme: Theme;
+  accent: Accent;
+  language: Language;
+  showUploadQueue: boolean;
+  defaultInspectorOpen: boolean;
+};
+
+const STORAGE_KEYS = {
+  theme: "mr_theme",
+  accent: "mr_accent",
+  language: "mr_language",
+  showUploadQueue: "mr_show_upload_queue",
+  defaultInspectorOpen: "mr_default_inspector_open"
+} as const;
+
+const DEFAULT_PREFERENCES: UiPreferences = {
+  theme: "dark",
+  accent: "clay",
+  language: "zh-CN",
+  showUploadQueue: true,
+  defaultInspectorOpen: true
+};
+
+const ACCENTS: Accent[] = ["clay", "blue", "green", "violet", "amber"];
+const LANGUAGES: Language[] = ["zh-CN", "en"];
+
+function resolveTheme(theme: Theme): ResolvedTheme {
+  if (theme !== "system") return theme;
+  if (typeof window === "undefined") return "dark";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function subscribeToSystemThemeChange(onChange: () => void) {
+  if (typeof window === "undefined") return () => {};
+  const media = window.matchMedia("(prefers-color-scheme: dark)");
+  const handler = () => onChange();
+  if (typeof media.addEventListener === "function") {
+    media.addEventListener("change", handler);
+    return () => media.removeEventListener("change", handler);
+  }
+  media.addListener(handler);
+  return () => media.removeListener(handler);
+}
 
 export function applyTheme(theme: Theme) {
-  document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.theme = resolveTheme(theme);
+}
+
+export function applyAccent(accent: Accent) {
+  document.documentElement.dataset.accent = accent;
 }
 
 export function getStoredTheme(): Theme {
-  const saved = localStorage.getItem("mr_theme");
-  return saved === "light" ? "light" : "dark";
+  const saved = localStorage.getItem(STORAGE_KEYS.theme);
+  return saved === "light" || saved === "system" ? saved : "dark";
+}
+
+export function getStoredAccent(): Accent {
+  const saved = localStorage.getItem(STORAGE_KEYS.accent);
+  return ACCENTS.includes(saved as Accent) ? (saved as Accent) : DEFAULT_PREFERENCES.accent;
+}
+
+export function getStoredLanguage(): Language {
+  const saved = localStorage.getItem(STORAGE_KEYS.language);
+  return LANGUAGES.includes(saved as Language) ? (saved as Language) : DEFAULT_PREFERENCES.language;
+}
+
+export function getStoredBooleanPreference(key: keyof Pick<typeof STORAGE_KEYS, "showUploadQueue" | "defaultInspectorOpen">, fallback: boolean) {
+  const saved = localStorage.getItem(STORAGE_KEYS[key]);
+  if (saved === "true") return true;
+  if (saved === "false") return false;
+  return fallback;
+}
+
+export function getStoredPreferences(): UiPreferences {
+  return {
+    theme: getStoredTheme(),
+    accent: getStoredAccent(),
+    language: getStoredLanguage(),
+    showUploadQueue: getStoredBooleanPreference("showUploadQueue", DEFAULT_PREFERENCES.showUploadQueue),
+    defaultInspectorOpen: getStoredBooleanPreference("defaultInspectorOpen", DEFAULT_PREFERENCES.defaultInspectorOpen)
+  };
 }
 
 export function setStoredTheme(theme: Theme) {
-  localStorage.setItem("mr_theme", theme);
+  localStorage.setItem(STORAGE_KEYS.theme, theme);
+}
+
+export function setStoredAccent(accent: Accent) {
+  localStorage.setItem(STORAGE_KEYS.accent, accent);
+}
+
+export function setStoredLanguage(language: Language) {
+  localStorage.setItem(STORAGE_KEYS.language, language);
+}
+
+export function setStoredBooleanPreference(key: keyof Pick<typeof STORAGE_KEYS, "showUploadQueue" | "defaultInspectorOpen">, value: boolean) {
+  localStorage.setItem(STORAGE_KEYS[key], String(value));
+}
+
+export function setStoredPreferences(next: UiPreferences) {
+  setStoredTheme(next.theme);
+  setStoredAccent(next.accent);
+  setStoredLanguage(next.language);
+  setStoredBooleanPreference("showUploadQueue", next.showUploadQueue);
+  setStoredBooleanPreference("defaultInspectorOpen", next.defaultInspectorOpen);
+}
+
+export function applyStoredPreferences() {
+  const prefs = getStoredPreferences();
+  applyTheme(prefs.theme);
+  applyAccent(prefs.accent);
+  return prefs;
 }
 
 export function useTheme() {
-  const [theme, setTheme] = useState<Theme>("dark");
+  const [theme, setThemeState] = useState<Theme>(DEFAULT_PREFERENCES.theme);
+  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(resolveTheme(DEFAULT_PREFERENCES.theme));
 
   useEffect(() => {
-    const t = getStoredTheme();
-    setTheme(t);
-    applyTheme(t);
+    const prefs = applyStoredPreferences();
+    setThemeState(prefs.theme);
+    setResolvedTheme(resolveTheme(prefs.theme));
   }, []);
 
-  function toggle() {
-    const next: Theme = theme === "dark" ? "light" : "dark";
-    setTheme(next);
-    setStoredTheme(next);
-    applyTheme(next);
+  useEffect(() => {
+    if (theme !== "system") return;
+    return subscribeToSystemThemeChange(() => {
+      setResolvedTheme(resolveTheme("system"));
+      applyTheme("system");
+    });
+  }, [theme]);
+
+  function setTheme(theme: Theme) {
+    setThemeState(theme);
+    setResolvedTheme(resolveTheme(theme));
+    setStoredTheme(theme);
+    applyTheme(theme);
   }
 
-  return { theme, toggle, setTheme };
+  function toggle() {
+    const next: Theme = resolvedTheme === "dark" ? "light" : "dark";
+    setTheme(next);
+  }
+
+  return { theme, resolvedTheme, toggle, setTheme };
+}
+
+export function useUiPreferences() {
+  const [preferences, setPreferencesState] = useState<UiPreferences>(DEFAULT_PREFERENCES);
+
+  useEffect(() => {
+    setPreferencesState(applyStoredPreferences());
+  }, []);
+
+  useEffect(() => {
+    if (preferences.theme !== "system") return;
+    return subscribeToSystemThemeChange(() => {
+      applyTheme("system");
+    });
+  }, [preferences.theme]);
+
+  function setPreferences(next: UiPreferences) {
+    setPreferencesState(next);
+    setStoredPreferences(next);
+    applyTheme(next.theme);
+    applyAccent(next.accent);
+  }
+
+  function patchPreferences(patch: Partial<UiPreferences>) {
+    setPreferences({ ...preferences, ...patch });
+  }
+
+  return {
+    preferences,
+    setPreferences,
+    patchPreferences,
+    labels: useMemo(() => buildLanguagePack(preferences.language), [preferences.language])
+  };
+}
+
+function buildLanguagePack(language: Language) {
+  if (language === "en") {
+    return {
+      shell: {
+        navProjects: "Projects",
+        navSettings: "General settings",
+        navAbout: "About",
+        userMenuLabel: "Current user",
+        userSettings: "User settings",
+        adminSettings: "Admin settings",
+        logout: "Log out",
+        userAriaLabel: "User",
+        topbarKicker: "Workbench",
+        topbarTitle: "Project workspace",
+        uploadsKicker: "Upload queue",
+        uploadsTitle: "Upload and processing",
+        clearUploads: "Clear history",
+        uploadTasks: "tasks",
+        uploadActive: "active"
+      },
+      settings: {
+        eyebrow: "Settings",
+        title: "General settings",
+        lead: "",
+        back: "Back to workbench",
+        appearanceKicker: "Appearance",
+        appearanceTitle: "Theme and accent",
+        appearanceNote: "",
+        themeLabel: "Theme",
+        accentLabel: "Accent",
+        languageKicker: "Language",
+        languageTitle: "Interface language",
+        languageNote: "",
+        workspaceKicker: "Workspace",
+        workspaceTitle: "Default behavior",
+        workspaceNote: "",
+        showUploadQueue: "Show upload queue",
+        defaultInspectorOpen: "Open inspector by default"
+      },
+      common: {
+        dark: "Dark",
+        light: "Light",
+        system: "System",
+        languageZh: "Chinese",
+        languageEn: "English",
+        accentClay: "Clay",
+        accentBlue: "Blue",
+        accentGreen: "Green",
+        accentViolet: "Violet",
+        accentAmber: "Amber",
+        on: "On",
+        off: "Off"
+      }
+    };
+  }
+
+  return {
+    shell: {
+      navProjects: "项目首页",
+      navSettings: "通用设置",
+      navAbout: "关于",
+      userMenuLabel: "当前用户",
+      userSettings: "用户设置",
+      adminSettings: "管理员设置",
+      logout: "退出登录",
+      userAriaLabel: "用户",
+      topbarKicker: "Workbench",
+      topbarTitle: "项目工作台",
+      uploadsKicker: "Upload queue",
+      uploadsTitle: "上传与处理进度",
+      clearUploads: "清空记录",
+      uploadTasks: "项任务",
+      uploadActive: "进行中"
+    },
+    settings: {
+      eyebrow: "Settings",
+      title: "通用设置",
+      lead: "",
+      back: "返回工作台",
+      appearanceKicker: "Appearance",
+      appearanceTitle: "主题与强调色",
+      appearanceNote: "",
+      themeLabel: "主题模式",
+      accentLabel: "强调色",
+      languageKicker: "Language",
+      languageTitle: "界面语言",
+      languageNote: "",
+      workspaceKicker: "Workspace",
+      workspaceTitle: "默认行为",
+      workspaceNote: "",
+      showUploadQueue: "显示上传队列",
+      defaultInspectorOpen: "默认开启检查器面板"
+    },
+    common: {
+      dark: "深色",
+      light: "浅色",
+      system: "跟随系统",
+      languageZh: "中文",
+      languageEn: "English",
+      accentClay: "陶土",
+      accentBlue: "海蓝",
+      accentGreen: "松绿",
+      accentViolet: "紫罗兰",
+      accentAmber: "琥珀",
+      on: "开启",
+      off: "关闭"
+    }
+  };
 }

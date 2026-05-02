@@ -1,5 +1,46 @@
-import type { Store } from "./types";
+import type { Store, StoreUser, StoreUserProfile } from "./types";
 import { prisma } from "../db";
+
+function toStoreUser(u: {
+  id: string;
+  username: string;
+  passwordHash: string;
+  displayName: string | null;
+  avatarObjectKey: string | null;
+  avatarContentType: string | null;
+  globalRole: "admin" | "user";
+  sessionVersion: number;
+  createdAt: Date;
+  updatedAt: Date;
+  deletedAt: Date | null;
+}): StoreUser {
+  return {
+    id: u.id,
+    username: u.username,
+    passwordHash: u.passwordHash,
+    displayName: u.displayName,
+    avatarObjectKey: u.avatarObjectKey,
+    avatarContentType: u.avatarContentType,
+    globalRole: u.globalRole,
+    sessionVersion: u.sessionVersion,
+    createdAt: u.createdAt,
+    updatedAt: u.updatedAt,
+    deletedAt: u.deletedAt
+  };
+}
+
+function toStoreUserProfile(user: StoreUser): StoreUserProfile {
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    avatarObjectKey: user.avatarObjectKey,
+    avatarContentType: user.avatarContentType,
+    globalRole: user.globalRole,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt
+  };
+}
 
 export function createPrismaStore(): Store {
   return {
@@ -9,22 +50,13 @@ export function createPrismaStore(): Store {
       const normalized = username.toLowerCase();
       const u = await prisma.user.findUnique({ where: { username: normalized } });
       if (!u || u.deletedAt) return null;
-      return {
-        id: u.id,
-        username: u.username,
-        passwordHash: u.passwordHash,
-        displayName: u.displayName,
-        createdAt: u.createdAt
-      };
+      return toStoreUser(u);
     },
 
     async userFindById(id) {
-      const u = await prisma.user.findUnique({
-        where: { id },
-        select: { id: true, username: true, displayName: true, createdAt: true, deletedAt: true }
-      });
+      const u = await prisma.user.findUnique({ where: { id } });
       if (!u || u.deletedAt) return null;
-      return { id: u.id, username: u.username, displayName: u.displayName, createdAt: u.createdAt };
+      return toStoreUser(u);
     },
 
     async userCreateOrRevive(args) {
@@ -34,16 +66,151 @@ export function createPrismaStore(): Store {
         create: {
           username: normalized,
           passwordHash: args.passwordHash,
-          displayName: args.displayName
+          displayName: args.displayName,
+          globalRole: args.globalRole ?? "user"
         },
         update: {
           passwordHash: args.passwordHash,
           displayName: args.displayName,
+          avatarObjectKey: null,
+          avatarContentType: null,
+          globalRole: args.globalRole ?? "user",
+          sessionVersion: 1,
           deletedAt: null
-        },
-        select: { id: true, username: true, displayName: true, createdAt: true }
+        }
       });
-      return user;
+      return toStoreUser(user);
+    },
+
+    async userEnsureAdmin(args) {
+      const normalized = args.username.toLowerCase();
+      const existing = await prisma.user.findUnique({ where: { username: normalized } });
+      if (existing) {
+        const user = await prisma.user.update({
+          where: { id: existing.id },
+          data: {
+            globalRole: "admin",
+            deletedAt: null
+          }
+        });
+        return toStoreUser(user);
+      }
+
+      const user = await prisma.user.create({
+        data: {
+          username: normalized,
+          passwordHash: args.passwordHash,
+          displayName: args.displayName,
+          globalRole: "admin"
+        }
+      });
+      return toStoreUser(user);
+    },
+
+    async userUpdateProfile(args) {
+      const existing = await prisma.user.findUnique({ where: { id: args.userId } });
+      if (!existing || existing.deletedAt) return null;
+      const user = await prisma.user.update({
+        where: { id: args.userId },
+        data: {
+          displayName: args.displayName,
+          avatarObjectKey: args.avatarObjectKey,
+          avatarContentType: args.avatarContentType
+        }
+      });
+      return toStoreUser(user);
+    },
+
+    async userChangePassword(args) {
+      const existing = await prisma.user.findUnique({ where: { id: args.userId } });
+      if (!existing || existing.deletedAt) return null;
+      const user = await prisma.user.update({
+        where: { id: args.userId },
+        data: {
+          passwordHash: args.passwordHash,
+          sessionVersion: args.nextSessionVersion
+        }
+      });
+      return toStoreUser(user);
+    },
+
+    async userList() {
+      const rows = await prisma.user.findMany({
+        where: { deletedAt: null },
+        orderBy: [{ createdAt: "asc" }]
+      });
+      return rows.map((row) => toStoreUserProfile(toStoreUser(row)));
+    },
+
+    async userCreateByAdmin(args) {
+      const normalized = args.username.toLowerCase();
+      const existing = await prisma.user.findUnique({ where: { username: normalized } });
+      if (existing && !existing.deletedAt) {
+        throw new Error("username_taken");
+      }
+      if (existing?.deletedAt) {
+        const revived = await prisma.user.update({
+          where: { id: existing.id },
+          data: {
+            username: normalized,
+            passwordHash: args.passwordHash,
+            displayName: args.displayName,
+            avatarObjectKey: null,
+            avatarContentType: null,
+            globalRole: args.globalRole ?? "user",
+            sessionVersion: 1,
+            deletedAt: null
+          }
+        });
+        return toStoreUser(revived);
+      }
+      const user = await prisma.user.create({
+        data: {
+          username: normalized,
+          passwordHash: args.passwordHash,
+          displayName: args.displayName,
+          globalRole: args.globalRole ?? "user"
+        }
+      });
+      return toStoreUser(user);
+    },
+
+    async adminUpdateUserProfile(args) {
+      const existing = await prisma.user.findUnique({ where: { id: args.userId } });
+      if (!existing || existing.deletedAt) return null;
+      const user = await prisma.user.update({
+        where: { id: args.userId },
+        data: {
+          displayName: args.displayName
+        }
+      });
+      return toStoreUser(user);
+    },
+
+    async adminResetUserPassword(args) {
+      const existing = await prisma.user.findUnique({ where: { id: args.userId } });
+      if (!existing || existing.deletedAt) return null;
+      const user = await prisma.user.update({
+        where: { id: args.userId },
+        data: {
+          passwordHash: args.passwordHash,
+          sessionVersion: args.nextSessionVersion
+        }
+      });
+      return toStoreUser(user);
+    },
+
+    async userSoftDelete(args) {
+      const existing = await prisma.user.findUnique({ where: { id: args.userId } });
+      if (!existing || existing.deletedAt) return null;
+      const user = await prisma.user.update({
+        where: { id: args.userId },
+        data: {
+          deletedAt: new Date(),
+          sessionVersion: existing.sessionVersion + 1
+        }
+      });
+      return toStoreUser(user);
     },
 
     async projectListForUser(userId) {

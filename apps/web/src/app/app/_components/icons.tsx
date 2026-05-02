@@ -50,6 +50,25 @@ export function IconSearch({ size = 18, style }: IconProps) {
   );
 }
 
+export function IconAutoTheme({ size = 18, style }: IconProps) {
+  const s = base(size);
+  return (
+    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 17.2a5.2 5.2 0 1 0 0-10.4 5.2 5.2 0 0 0 0 10.4z" />
+      <path d="M12 1.8v2.1" />
+      <path d="M12 20.1v2.1" />
+      <path d="M4.1 12H2" />
+      <path d="M22 12h-2.1" />
+      <path d="M5.4 5.4 3.9 3.9" />
+      <path d="M20.1 20.1 18.6 18.6" />
+      <path d="M18.6 5.4 20.1 3.9" />
+      <path d="M3.9 20.1 5.4 18.6" />
+      <path d="M9.15 14.25 12 8.35l2.85 5.9" strokeWidth="1.9" />
+      <path d="M10.15 12.35h3.7" strokeWidth="1.9" />
+    </svg>
+  );
+}
+
 export function IconSun({ size = 18, style }: IconProps) {
   const s = base(size);
   return (
@@ -126,11 +145,11 @@ export function IconFolder({ size = 18, style }: IconProps) {
 export function IconChevron({
   size = 18,
   style,
-  dir = "right" as "right" | "down"
-}: IconProps & { dir?: "right" | "down" }) {
+  dir = "right" as "right" | "left" | "down"
+}: IconProps & { dir?: "right" | "left" | "down" }) {
   const st = style as CSSProperties | undefined;
   const s = base(size);
-  const rot = dir === "down" ? "rotate(90deg)" : "rotate(0deg)";
+  const rot = dir === "down" ? "rotate(90deg)" : dir === "left" ? "rotate(180deg)" : "rotate(0deg)";
   return (
     <svg
       viewBox="0 0 24 24"

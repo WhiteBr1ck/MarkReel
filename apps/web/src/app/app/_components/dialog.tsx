@@ -48,8 +48,8 @@ export function Dialog({ open, title, description, children, footer, onClose }: 
               </p>
             ) : null}
           </div>
-          <button type="button" className="mr-btn mr-btn--ghost" onClick={onClose} aria-label="关闭">
-            关闭
+          <button type="button" className="mr-dialog__close" onClick={onClose} aria-label="关闭">
+            <span aria-hidden="true">×</span>
           </button>
         </div>
         <div className="mr-dialog__body">{children}</div>

@@ -8,6 +8,10 @@ import { registerJwt } from "./auth/tokens";
 import { authRoutes } from "./routes/auth";
 import { projectRoutes } from "./routes/projects";
 import { ensureStorageBuckets } from "./s3";
+import { getStore } from "./store";
+import { hashPassword } from "./auth/password";
+import { userRoutes } from "./routes/users";
+import { adminRoutes } from "./routes/admin";
 
 function isStorageUnavailableError(err: unknown) {
   const error = err as {
@@ -26,6 +30,16 @@ function isStorageUnavailableError(err: unknown) {
     error?.message?.includes("ECONNREFUSED") ||
     error?.message?.includes("ENOTFOUND")
   );
+}
+
+async function ensureAdminUser() {
+  if (!env.MARKREEL_ADMIN_USERNAME || !env.MARKREEL_ADMIN_PASSWORD) return;
+  const passwordHash = await hashPassword(env.MARKREEL_ADMIN_PASSWORD);
+  await getStore().userEnsureAdmin({
+    username: env.MARKREEL_ADMIN_USERNAME,
+    passwordHash,
+    displayName: env.MARKREEL_ADMIN_DISPLAY_NAME ?? null
+  });
 }
 
 async function bootstrap() {
@@ -79,12 +93,16 @@ async function bootstrap() {
     }
   }
 
+  await ensureAdminUser();
+
   app.get("/health", async () => ({ ok: true }));
   app.get("/", async () => ({ name: "MarkReel API", status: "ok" }));
 
   await app.register(
     async (apiScope) => {
       await authRoutes(apiScope);
+      await userRoutes(apiScope);
+      await adminRoutes(apiScope);
       await projectRoutes(apiScope);
 
       if (env.MARKREEL_STORE !== "inmemory") {

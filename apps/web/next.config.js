@@ -2,6 +2,7 @@
 const nextConfig = {
   output: process.env.NODE_ENV === "production" ? "standalone" : undefined,
   reactStrictMode: true,
+  devIndicators: false,
   async rewrites() {
     const apiTarget =
       process.env.INTERNAL_API_BASE_URL ||
