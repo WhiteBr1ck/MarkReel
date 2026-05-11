@@ -60,6 +60,7 @@ model User {
   displayName       String?
   avatarObjectKey   String?
   avatarContentType String?
+  avatarPreset      String?
   globalRole        UserGlobalRole @default(user)
   sessionVersion    Int            @default(1)
   createdAt         DateTime       @default(now())

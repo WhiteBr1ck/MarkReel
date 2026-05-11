@@ -22,7 +22,7 @@ const ResetAdminUserPasswordSchema = z.object({
 
 type AdminUserShape = Pick<
   StoreUser,
-  "id" | "username" | "displayName" | "avatarObjectKey" | "avatarContentType" | "globalRole" | "createdAt" | "updatedAt"
+  "id" | "username" | "displayName" | "avatarObjectKey" | "avatarContentType" | "avatarPreset" | "globalRole" | "createdAt" | "updatedAt"
 >;
 
 function toAdminUser(user: AdminUserShape) {
@@ -32,6 +32,7 @@ function toAdminUser(user: AdminUserShape) {
     displayName: user.displayName,
     avatarObjectKey: user.avatarObjectKey,
     avatarContentType: user.avatarContentType,
+    avatarPreset: user.avatarPreset,
     globalRole: user.globalRole,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt

@@ -1,4 +1,5 @@
 import type { Store, StoreUser, StoreUserProfile } from "./types";
+import { createRandomAvatarPreset } from "../avatarPresets";
 import { prisma } from "../db";
 
 function toStoreUser(u: {
@@ -8,6 +9,7 @@ function toStoreUser(u: {
   displayName: string | null;
   avatarObjectKey: string | null;
   avatarContentType: string | null;
+  avatarPreset: string | null;
   globalRole: "admin" | "user";
   sessionVersion: number;
   createdAt: Date;
@@ -21,6 +23,7 @@ function toStoreUser(u: {
     displayName: u.displayName,
     avatarObjectKey: u.avatarObjectKey,
     avatarContentType: u.avatarContentType,
+    avatarPreset: u.avatarPreset,
     globalRole: u.globalRole,
     sessionVersion: u.sessionVersion,
     createdAt: u.createdAt,
@@ -36,6 +39,7 @@ function toStoreUserProfile(user: StoreUser): StoreUserProfile {
     displayName: user.displayName,
     avatarObjectKey: user.avatarObjectKey,
     avatarContentType: user.avatarContentType,
+    avatarPreset: user.avatarPreset,
     globalRole: user.globalRole,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt
@@ -67,6 +71,7 @@ export function createPrismaStore(): Store {
           username: normalized,
           passwordHash: args.passwordHash,
           displayName: args.displayName,
+          avatarPreset: createRandomAvatarPreset(),
           globalRole: args.globalRole ?? "user"
         },
         update: {
@@ -74,6 +79,7 @@ export function createPrismaStore(): Store {
           displayName: args.displayName,
           avatarObjectKey: null,
           avatarContentType: null,
+          avatarPreset: createRandomAvatarPreset(),
           globalRole: args.globalRole ?? "user",
           sessionVersion: 1,
           deletedAt: null
@@ -101,6 +107,7 @@ export function createPrismaStore(): Store {
           username: normalized,
           passwordHash: args.passwordHash,
           displayName: args.displayName,
+          avatarPreset: createRandomAvatarPreset(),
           globalRole: "admin"
         }
       });
@@ -115,7 +122,8 @@ export function createPrismaStore(): Store {
         data: {
           displayName: args.displayName,
           avatarObjectKey: args.avatarObjectKey,
-          avatarContentType: args.avatarContentType
+          avatarContentType: args.avatarContentType,
+          avatarPreset: args.avatarPreset
         }
       });
       return toStoreUser(user);
@@ -157,6 +165,7 @@ export function createPrismaStore(): Store {
             displayName: args.displayName,
             avatarObjectKey: null,
             avatarContentType: null,
+            avatarPreset: createRandomAvatarPreset(),
             globalRole: args.globalRole ?? "user",
             sessionVersion: 1,
             deletedAt: null
@@ -169,6 +178,7 @@ export function createPrismaStore(): Store {
           username: normalized,
           passwordHash: args.passwordHash,
           displayName: args.displayName,
+          avatarPreset: createRandomAvatarPreset(),
           globalRole: args.globalRole ?? "user"
         }
       });

@@ -12,7 +12,8 @@ import type { StoreUser } from "../store/types";
 const UpdateProfileSchema = z.object({
   displayName: z.string().trim().min(1).max(80).nullable(),
   avatarObjectKey: z.string().trim().min(1).max(260).nullable(),
-  avatarContentType: z.string().trim().min(1).max(120).nullable()
+  avatarContentType: z.string().trim().min(1).max(120).nullable(),
+  avatarPreset: z.string().trim().min(1).max(80).nullable()
 });
 
 const ChangePasswordSchema = z.object({
@@ -36,6 +37,7 @@ function toApiUser(user: StoreUser, avatarUrl?: string | null) {
     displayName: user.displayName,
     avatarObjectKey: user.avatarObjectKey,
     avatarContentType: user.avatarContentType,
+    avatarPreset: user.avatarPreset,
     avatarUrl: avatarUrl ?? null,
     globalRole: user.globalRole,
     createdAt: user.createdAt
@@ -60,7 +62,8 @@ export async function userRoutes(app: FastifyInstance) {
       userId: currentUser.id,
       displayName: input.displayName,
       avatarObjectKey: input.avatarObjectKey,
-      avatarContentType: input.avatarContentType
+      avatarContentType: input.avatarContentType,
+      avatarPreset: input.avatarPreset
     });
     if (!user) return reply.code(404).send({ error: "not_found" });
 

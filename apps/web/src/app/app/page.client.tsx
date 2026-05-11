@@ -15,6 +15,7 @@ type ApiUser = {
   username: string;
   displayName: string | null;
   avatarUrl?: string | null;
+  avatarPreset?: string | null;
   globalRole?: "admin" | "user";
 };
 type WorkspaceResponse = {
@@ -2371,24 +2372,6 @@ export default function AppClient() {
                   )
                 ) : null}
               </div>
-
-              {inspectorPaneOpen ? (
-                <div className="mr-panel" style={{ padding: 12, boxShadow: "none" }}>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>当前状态</div>
-                  <div style={{ marginTop: 8, opacity: 0.75, fontSize: 13, lineHeight: 1.5 }}>
-                    {previewBusy
-                      ? "正在获取视频预览地址…"
-                      : busy
-                        ? "正在同步项目内容与上传任务…"
-                        : scope === "trash"
-                          ? "回收站支持恢复与下载已删除视频。"
-                          : selectionMode
-                            ? "已进入批量选择模式；重命名仍只支持一次处理一个条目。"
-                            : "当前已接入真实项目接口，支持项目管理、上传进度和视频预览。"}
-                  </div>
-                  {err && !feedback ? <div style={{ marginTop: 8, color: "var(--warn)", fontSize: 13 }}>{err}</div> : null}
-                </div>
-              ) : null}
             </div>
           }
         />

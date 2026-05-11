@@ -62,8 +62,8 @@ const annotationReplySelect = {
   completedById: true,
   createdAt: true,
   updatedAt: true,
-  author: { select: { id: true, username: true, displayName: true } },
-  completedBy: { select: { id: true, username: true, displayName: true } },
+  author: { select: { id: true, username: true, displayName: true, avatarObjectKey: true, avatarPreset: true } },
+  completedBy: { select: { id: true, username: true, displayName: true, avatarObjectKey: true, avatarPreset: true } },
   attachments: {
     select: {
       id: true,
@@ -93,8 +93,8 @@ const annotationSelect = {
   completedById: true,
   createdAt: true,
   updatedAt: true,
-  author: { select: { id: true, username: true, displayName: true } },
-  completedBy: { select: { id: true, username: true, displayName: true } },
+  author: { select: { id: true, username: true, displayName: true, avatarObjectKey: true, avatarPreset: true } },
+  completedBy: { select: { id: true, username: true, displayName: true, avatarObjectKey: true, avatarPreset: true } },
   attachments: {
     select: {
       id: true,
@@ -160,6 +160,35 @@ async function assertAnnotationAccess(userId: string, annotationId: string) {
   return annotation;
 }
 
+async function hydrateAnnotationAvatarUrls<T extends Array<any>>(annotations: T): Promise<T> {
+  const keys = new Map<string, string>();
+  for (const annotation of annotations) {
+    if (annotation.author?.avatarObjectKey) keys.set(annotation.author.avatarObjectKey, "");
+    for (const reply of annotation.replies ?? []) {
+      if (reply.author?.avatarObjectKey) keys.set(reply.author.avatarObjectKey, "");
+    }
+  }
+
+  await Promise.all(
+    [...keys.keys()].map(async (objectKey) => {
+      keys.set(objectKey, await presignGetObject({ bucket: env.S3_BUCKET_ATTACHMENTS, objectKey, expiresInSeconds: 900 }));
+    })
+  );
+
+  return annotations.map((annotation) => ({
+    ...annotation,
+    author: annotation.author
+      ? { ...annotation.author, avatarUrl: annotation.author.avatarObjectKey ? keys.get(annotation.author.avatarObjectKey) ?? null : null }
+      : annotation.author,
+    replies: annotation.replies?.map((reply: any) => ({
+      ...reply,
+      author: reply.author
+        ? { ...reply.author, avatarUrl: reply.author.avatarObjectKey ? keys.get(reply.author.avatarObjectKey) ?? null : null }
+        : reply.author
+    }))
+  })) as T;
+}
+
 export async function annotationRoutes(app: FastifyInstance) {
   app.get("/media/:mediaId/annotations", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
@@ -174,7 +203,7 @@ export async function annotationRoutes(app: FastifyInstance) {
       select: annotationSelect
     });
 
-    return { annotations };
+    return { annotations: await hydrateAnnotationAvatarUrls(annotations) };
   });
 
   app.get(
@@ -194,7 +223,7 @@ export async function annotationRoutes(app: FastifyInstance) {
       });
 
       reply.header("content-type", "application/json; charset=utf-8");
-      return reply.send({ mediaId, annotations });
+      return reply.send({ mediaId, annotations: await hydrateAnnotationAvatarUrls(annotations) });
     }
   );
 

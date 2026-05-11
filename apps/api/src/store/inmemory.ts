@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createRandomAvatarPreset } from "../avatarPresets";
 import type { Store, StoreProject, StoreUser, StoreUserProfile } from "./types";
 
 const usersById = new Map<string, StoreUser>();
@@ -17,6 +18,7 @@ function toProfile(user: StoreUser): StoreUserProfile {
     displayName: user.displayName,
     avatarObjectKey: user.avatarObjectKey,
     avatarContentType: user.avatarContentType,
+    avatarPreset: user.avatarPreset,
     globalRole: user.globalRole,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt
@@ -59,6 +61,7 @@ export function createInMemoryStore(): Store {
         existing.displayName = args.displayName;
         existing.avatarObjectKey = null;
         existing.avatarContentType = null;
+        existing.avatarPreset = createRandomAvatarPreset();
         existing.globalRole = args.globalRole ?? "user";
         existing.sessionVersion = 1;
         existing.updatedAt = now();
@@ -74,6 +77,7 @@ export function createInMemoryStore(): Store {
         displayName: args.displayName,
         avatarObjectKey: null,
         avatarContentType: null,
+        avatarPreset: createRandomAvatarPreset(),
         globalRole: args.globalRole ?? "user",
         sessionVersion: 1,
         createdAt: t,
@@ -104,6 +108,7 @@ export function createInMemoryStore(): Store {
         displayName: args.displayName,
         avatarObjectKey: null,
         avatarContentType: null,
+        avatarPreset: createRandomAvatarPreset(),
         globalRole: "admin",
         sessionVersion: 1,
         createdAt: t,
@@ -121,6 +126,7 @@ export function createInMemoryStore(): Store {
       user.displayName = args.displayName;
       user.avatarObjectKey = args.avatarObjectKey;
       user.avatarContentType = args.avatarContentType;
+      user.avatarPreset = args.avatarPreset;
       user.updatedAt = now();
       return user;
     },
@@ -153,6 +159,7 @@ export function createInMemoryStore(): Store {
         existing.displayName = args.displayName;
         existing.avatarObjectKey = null;
         existing.avatarContentType = null;
+        existing.avatarPreset = createRandomAvatarPreset();
         existing.globalRole = args.globalRole ?? "user";
         existing.sessionVersion = 1;
         existing.updatedAt = now();
@@ -168,6 +175,7 @@ export function createInMemoryStore(): Store {
         displayName: args.displayName,
         avatarObjectKey: null,
         avatarContentType: null,
+        avatarPreset: createRandomAvatarPreset(),
         globalRole: args.globalRole ?? "user",
         sessionVersion: 1,
         createdAt: t,

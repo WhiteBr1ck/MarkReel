@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { prisma } from "../db";
 import { getUserId, requireUser } from "../auth/requireUser";
-import { presignGetObject, presignPutObject, statObject } from "../s3";
+import { presignGetObject, presignPutObject, statObject, getObjectStream } from "../s3";
 import { env } from "../env";
 import { auditLog } from "../audit";
 import { mediaQueue } from "../queue";
@@ -129,6 +129,41 @@ async function readMediaMetadata(objectKey: string) {
     bitrateKbps: bitrate ? Math.max(1, Math.round(bitrate / 1000)) : undefined,
     frameCount: explicitFrames ? Math.max(1, Math.round(explicitFrames)) : derivedFrameCount ? Math.max(1, derivedFrameCount) : undefined
   };
+}
+
+async function getPreviewTargetForMedia(mediaId: string) {
+  const media = await prisma.media.findUnique({
+    where: { id: mediaId },
+    select: {
+      id: true,
+      title: true,
+      status: true,
+      files: {
+        select: {
+          originalObjectKey: true,
+          derivedPrefix: true,
+          mode: true,
+          createdAt: true
+        },
+        orderBy: { createdAt: "desc" },
+        take: 1
+      }
+    }
+  });
+
+  const file = media?.files[0];
+  if (!media || !file?.originalObjectKey) return null;
+  if (file.mode === "compress" && media.status === "failed") return { failed: true as const };
+
+  const target =
+    file.mode === "compress"
+      ? file.derivedPrefix && media.status === "ready"
+        ? { bucket: env.S3_BUCKET_DERIVED, objectKey: file.derivedPrefix }
+        : null
+      : { bucket: env.S3_BUCKET_ORIGINAL, objectKey: file.originalObjectKey };
+
+  if (!target) return null;
+  return { media, target };
 }
 
 async function assertProjectAccess(userId: string, projectId: string) {
@@ -549,54 +584,11 @@ export async function mediaRoutes(app: FastifyInstance) {
     if (!access) return reply.code(404).send({ error: "not_found" });
 
     const query = PreviewQuerySchema.parse(req.query ?? {});
-    const media = await prisma.media.findUnique({
-      where: { id: mediaId },
-      select: {
-        id: true,
-        title: true,
-        status: true,
-        files: {
-          select: {
-            originalObjectKey: true,
-            derivedPrefix: true,
-            mode: true,
-            createdAt: true
-          },
-          orderBy: { createdAt: "desc" },
-          take: 1
-        }
-      }
-    });
+    const result = await getPreviewTargetForMedia(mediaId);
+    if (!result) return reply.code(404).send({ error: "preview_not_ready" });
+    if ("failed" in result) return reply.code(409).send({ error: "processing_failed" });
 
-    const file = media?.files[0];
-    if (!media || !file?.originalObjectKey) {
-      return reply.code(404).send({ error: "preview_not_ready" });
-    }
-
-    const previewTarget =
-      file.mode === "compress"
-        ? media.status === "failed"
-          ? null
-          : file.derivedPrefix && media.status === "ready"
-            ? {
-                bucket: env.S3_BUCKET_DERIVED,
-                objectKey: file.derivedPrefix
-              }
-            : null
-        : {
-            bucket: env.S3_BUCKET_ORIGINAL,
-            objectKey: file.originalObjectKey
-          };
-
-    if (file.mode === "compress" && media.status === "failed") {
-      return reply.code(409).send({ error: "processing_failed" });
-    }
-
-    if (!previewTarget) {
-      return reply.code(404).send({ error: "preview_not_ready" });
-    }
-
-    const url = await presignGetObject(previewTarget);
+    const url = await presignGetObject(result.target);
 
     await auditLog({
       req,
@@ -604,16 +596,57 @@ export async function mediaRoutes(app: FastifyInstance) {
       action: "media.preview",
       entityType: "Media",
       entityId: mediaId,
-      meta: { objectKey: previewTarget.objectKey, bucket: previewTarget.bucket }
+      meta: { objectKey: result.target.objectKey, bucket: result.target.bucket }
     });
 
     return reply.send({
       preview: {
         url,
-        fileName: media.title,
+        fileName: result.media.title,
         inline: query.inline
       }
     });
+  });
+
+  app.get("/media/:mediaId/preview/file", { preHandler: requireUser }, async (req, reply) => {
+    const userId = getUserId(req);
+    const mediaId = (req.params as any).mediaId as string;
+    const access = await assertMediaAccess(userId, mediaId);
+    if (!access) return reply.code(404).send({ error: "not_found" });
+
+    const result = await getPreviewTargetForMedia(mediaId);
+    if (!result) return reply.code(404).send({ error: "preview_not_ready" });
+    if ("failed" in result) return reply.code(409).send({ error: "processing_failed" });
+
+    const range = req.headers.range;
+    const initialObject = await getObjectStream(result.target);
+    if (!initialObject.body) return reply.code(404).send({ error: "preview_not_ready" });
+
+    if (range && initialObject.contentLength) {
+      initialObject.body.destroy();
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (!match) return reply.code(416).send();
+      const total = initialObject.contentLength;
+      const start = match[1] ? Number(match[1]) : 0;
+      const end = match[2] ? Number(match[2]) : total - 1;
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= total) return reply.code(416).send();
+      const rangedObject = await getObjectStream({ ...result.target, range: `bytes=${start}-${Math.min(end, total - 1)}` });
+      if (!rangedObject.body) return reply.code(404).send({ error: "preview_not_ready" });
+      reply.code(206);
+      reply.header("content-range", `bytes ${start}-${Math.min(end, total - 1)}/${total}`);
+      reply.header("content-length", String(Math.min(end, total - 1) - start + 1));
+      reply.header("content-type", rangedObject.contentType ?? initialObject.contentType ?? "video/mp4");
+      reply.header("accept-ranges", "bytes");
+      return reply.send(rangedObject.body);
+    }
+
+    reply.header("content-type", initialObject.contentType ?? "video/mp4");
+    if (initialObject.contentLength) reply.header("content-length", String(initialObject.contentLength));
+    if (initialObject.etag) reply.header("etag", initialObject.etag);
+    if (initialObject.lastModified) reply.header("last-modified", initialObject.lastModified.toUTCString());
+    reply.header("accept-ranges", "bytes");
+
+    return reply.send(initialObject.body);
   });
 
   app.get("/media/:mediaId/download", { preHandler: requireUser }, async (req, reply) => {

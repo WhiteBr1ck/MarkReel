@@ -18,7 +18,9 @@ export async function attachmentRoutes(app: FastifyInstance) {
     const ext = input.filename.includes(".")
       ? input.filename.split(".").pop()!.slice(0, 10)
       : "bin";
-    const objectKey = `attachments/${nanoid(18)}.${ext}`;
+    const objectKey = input.filename.startsWith("markup-")
+      ? `attachments/markup/${nanoid(18)}.${ext}`
+      : `attachments/${nanoid(18)}.${ext}`;
     const url = await presignPutObject({
       bucket: env.S3_BUCKET_ATTACHMENTS,
       objectKey,

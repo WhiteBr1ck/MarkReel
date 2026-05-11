@@ -1,5 +1,6 @@
 "use client";
 
+import AvatarSvg from "boring-avatars";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -17,6 +18,7 @@ export type ApiUser = {
   username: string;
   displayName: string | null;
   avatarUrl?: string | null;
+  avatarPreset?: string | null;
   globalRole?: "admin" | "user";
 };
 export type Project = { id: string; name: string; ownerId: string; createdAt: string; updatedAt: string };
@@ -85,9 +87,17 @@ type Props = {
   right: ReactNode;
 };
 
-function Avatar({ name, src, label }: { name: string; src?: string | null; label: string }) {
-  const initial = (name.trim()[0] ?? "U").toUpperCase();
-  return src ? <img className="mr-shell__avatar-image" src={src} alt={label} /> : <div className="mr-shell__avatar" aria-label={label}>{initial}</div>;
+const AVATAR_COLORS = ["#27201c", "#c96442", "#e5b56d", "#6f7f68", "#f2eadb"];
+
+function Avatar({ name, src, preset, label }: { name: string; src?: string | null; preset?: string | null; label: string }) {
+  const avatarName = preset || name || "markreel";
+  return src ? (
+    <img className="mr-shell__avatar-image" src={src} alt={label} />
+  ) : (
+    <div className="mr-shell__avatar" aria-label={label}>
+      <AvatarSvg name={avatarName} colors={AVATAR_COLORS} variant="beam" size={44} square />
+    </div>
+  );
 }
 
 function PrimaryNav({
@@ -290,7 +300,7 @@ function Topbar({
 
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <button type="button" onClick={() => setMenuOpen((s) => !s)} className="mr-shell__user-button" title={labels.shell.userAriaLabel}>
-              <Avatar name={userName} src={user.avatarUrl} label={labels.shell.userAriaLabel} />
+              <Avatar name={userName} src={user.avatarUrl} preset={user.avatarPreset} label={labels.shell.userAriaLabel} />
             </button>
           </div>
         </div>

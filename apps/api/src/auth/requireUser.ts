@@ -9,6 +9,7 @@ export type CurrentUser = {
   displayName: string | null;
   avatarObjectKey: string | null;
   avatarContentType: string | null;
+  avatarPreset: string | null;
   globalRole: UserGlobalRole;
   createdAt: Date;
 };
@@ -34,6 +35,7 @@ export async function requireUser(req: FastifyRequest, reply: FastifyReply) {
       displayName: user.displayName,
       avatarObjectKey: user.avatarObjectKey,
       avatarContentType: user.avatarContentType,
+      avatarPreset: user.avatarPreset,
       globalRole: user.globalRole,
       createdAt: user.createdAt
     } satisfies CurrentUser;

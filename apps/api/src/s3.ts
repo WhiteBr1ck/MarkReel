@@ -8,6 +8,7 @@ import {
   PutObjectCommand
 } from "@aws-sdk/client-s3";
 import type { S3ServiceException } from "@aws-sdk/client-s3";
+import { Readable } from "node:stream";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { env } from "./env";
 
@@ -95,6 +96,28 @@ export async function statObject(args: {
   };
 }
 
+export async function getObjectStream(args: {
+  bucket: string;
+  objectKey: string;
+  range?: string;
+}) {
+  const res = await s3.send(
+    new GetObjectCommand({
+      Bucket: args.bucket,
+      Key: args.objectKey,
+      Range: args.range
+    })
+  );
+
+  return {
+    body: res.Body as Readable | undefined,
+    contentType: res.ContentType ?? undefined,
+    contentLength: typeof res.ContentLength === "number" ? res.ContentLength : undefined,
+    etag: res.ETag ?? undefined,
+    lastModified: res.LastModified ?? undefined
+  };
+}
+
 export async function presignGetObject(args: {
   bucket: string;
   objectKey: string;
@@ -109,3 +132,4 @@ export async function presignGetObject(args: {
   });
   return url;
 }
+

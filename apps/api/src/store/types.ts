@@ -7,6 +7,7 @@ export type StoreUser = {
   displayName: string | null;
   avatarObjectKey: string | null;
   avatarContentType: string | null;
+  avatarPreset: string | null;
   globalRole: UserGlobalRole;
   sessionVersion: number;
   createdAt: Date;
@@ -20,6 +21,7 @@ export type StoreUserProfile = {
   displayName: string | null;
   avatarObjectKey: string | null;
   avatarContentType: string | null;
+  avatarPreset: string | null;
   globalRole: UserGlobalRole;
   createdAt: Date;
   updatedAt: Date;
@@ -54,6 +56,7 @@ export type Store = {
     displayName: string | null;
     avatarObjectKey: string | null;
     avatarContentType: string | null;
+    avatarPreset: string | null;
   }): Promise<StoreUser | null>;
   userChangePassword(args: {
     userId: string;

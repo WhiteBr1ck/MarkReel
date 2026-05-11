@@ -41,6 +41,7 @@ async function toApiUser(user: StoreUser) {
     displayName: user.displayName,
     avatarObjectKey: user.avatarObjectKey,
     avatarContentType: user.avatarContentType,
+    avatarPreset: user.avatarPreset,
     avatarUrl: await buildAvatarUrl(user),
     globalRole: user.globalRole,
     createdAt: user.createdAt
