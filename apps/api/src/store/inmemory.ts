@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createRandomAvatarPreset } from "../avatarPresets";
+import { capabilitiesForRole } from "../access";
 import type { Store, StoreProject, StoreUser, StoreUserProfile } from "./types";
 
 const usersById = new Map<string, StoreUser>();
@@ -20,8 +21,11 @@ function toProfile(user: StoreUser): StoreUserProfile {
     avatarContentType: user.avatarContentType,
     avatarPreset: user.avatarPreset,
     globalRole: user.globalRole,
+    lastLoginAt: user.lastLoginAt,
+    disabledAt: user.disabledAt,
     createdAt: user.createdAt,
-    updatedAt: user.updatedAt
+    updatedAt: user.updatedAt,
+    deletedAt: user.deletedAt
   };
 }
 
@@ -32,6 +36,15 @@ function ensureMembership(userId: string, projectId: string) {
     membershipsByUserId.set(userId, set);
   }
   set.add(projectId);
+}
+
+function withOwnerAccess(project: StoreProject): StoreProject {
+  return {
+    ...project,
+    role: "owner",
+    accessSource: "owner",
+    capabilities: capabilitiesForRole("owner")
+  };
 }
 
 export function createInMemoryStore(): Store {
@@ -64,6 +77,7 @@ export function createInMemoryStore(): Store {
         existing.avatarPreset = createRandomAvatarPreset();
         existing.globalRole = args.globalRole ?? "user";
         existing.sessionVersion = 1;
+        existing.disabledAt = null;
         existing.updatedAt = now();
         existing.deletedAt = null;
         return existing;
@@ -80,6 +94,8 @@ export function createInMemoryStore(): Store {
         avatarPreset: createRandomAvatarPreset(),
         globalRole: args.globalRole ?? "user",
         sessionVersion: 1,
+        lastLoginAt: null,
+        disabledAt: null,
         createdAt: t,
         updatedAt: t,
         deletedAt: null
@@ -95,6 +111,7 @@ export function createInMemoryStore(): Store {
       if (existingId) {
         const existing = usersById.get(existingId)!;
         existing.globalRole = "admin";
+        existing.disabledAt = null;
         existing.updatedAt = now();
         existing.deletedAt = null;
         return existing;
@@ -111,6 +128,8 @@ export function createInMemoryStore(): Store {
         avatarPreset: createRandomAvatarPreset(),
         globalRole: "admin",
         sessionVersion: 1,
+        lastLoginAt: null,
+        disabledAt: null,
         createdAt: t,
         updatedAt: t,
         deletedAt: null
@@ -140,9 +159,17 @@ export function createInMemoryStore(): Store {
       return user;
     },
 
-    async userList() {
+    async userRecordLogin(args) {
+      const user = usersById.get(args.userId) ?? null;
+      if (!user || user.deletedAt) return null;
+      user.lastLoginAt = now();
+      user.updatedAt = now();
+      return user;
+    },
+
+    async userList(args) {
       return Array.from(usersById.values())
-        .filter((user) => !user.deletedAt)
+        .filter((user) => args?.includeDeleted || !user.deletedAt)
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
         .map((user) => toProfile(user));
     },
@@ -162,6 +189,7 @@ export function createInMemoryStore(): Store {
         existing.avatarPreset = createRandomAvatarPreset();
         existing.globalRole = args.globalRole ?? "user";
         existing.sessionVersion = 1;
+        existing.disabledAt = null;
         existing.updatedAt = now();
         existing.deletedAt = null;
         return existing;
@@ -178,6 +206,8 @@ export function createInMemoryStore(): Store {
         avatarPreset: createRandomAvatarPreset(),
         globalRole: args.globalRole ?? "user",
         sessionVersion: 1,
+        lastLoginAt: null,
+        disabledAt: null,
         createdAt: t,
         updatedAt: t,
         deletedAt: null
@@ -191,6 +221,7 @@ export function createInMemoryStore(): Store {
       const user = usersById.get(args.userId) ?? null;
       if (!user || user.deletedAt) return null;
       user.displayName = args.displayName;
+      if (args.globalRole) user.globalRole = args.globalRole;
       user.updatedAt = now();
       return user;
     },
@@ -213,12 +244,32 @@ export function createInMemoryStore(): Store {
       return user;
     },
 
+    async adminSetUserDisabled(args) {
+      const user = usersById.get(args.userId) ?? null;
+      if (!user || user.deletedAt) return null;
+      user.disabledAt = args.disabled ? now() : null;
+      user.sessionVersion += 1;
+      user.updatedAt = now();
+      return user;
+    },
+
+    async adminRestoreUser(args) {
+      const user = usersById.get(args.userId) ?? null;
+      if (!user || !user.deletedAt) return null;
+      user.deletedAt = null;
+      user.disabledAt = null;
+      user.sessionVersion += 1;
+      user.updatedAt = now();
+      return user;
+    },
+
     async projectListForUser(userId) {
       const ids = membershipsByUserId.get(userId);
       if (!ids) return [];
       return Array.from(ids)
         .map((id) => projectsById.get(id))
         .filter((p): p is StoreProject => Boolean(p))
+        .map((project) => withOwnerAccess(project))
         .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
     },
 
@@ -239,7 +290,8 @@ export function createInMemoryStore(): Store {
     async projectGetForUser({ userId, projectId }) {
       const memberships = membershipsByUserId.get(userId);
       if (!memberships?.has(projectId)) return null;
-      return projectsById.get(projectId) ?? null;
+      const project = projectsById.get(projectId) ?? null;
+      return project ? withOwnerAccess(project) : null;
     },
 
     async projectRenameForUser({ userId, projectId, name }) {

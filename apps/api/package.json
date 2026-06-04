@@ -7,7 +7,7 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
-    "test": "node --test"
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^9.4.0",

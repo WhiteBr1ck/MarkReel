@@ -24,6 +24,12 @@ const EnvSchema = z.object({
   JWT_REFRESH_SECRET: z.string().min(16).default("dev_refresh_secret_change_me_123456"),
   JWT_ACCESS_TTL_SECONDS: z.coerce.number().int().positive().default(900),
   JWT_REFRESH_TTL_SECONDS: z.coerce.number().int().positive().default(604800),
+  JWT_AUTH_INSTANCE_ID: z.string().trim().min(8).max(120).optional(),
+
+  MARKREEL_ALLOW_PUBLIC_REGISTRATION: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
 
   MARKREEL_ADMIN_USERNAME: z
     .string()
@@ -40,6 +46,7 @@ const EnvSchema = z.object({
   REDIS_URL: z.string().min(1).optional(),
 
   S3_ENDPOINT: z.string().url(),
+  S3_PUBLIC_ENDPOINT: z.string().url().optional(),
   S3_REGION: z.string().default("us-east-1"),
   S3_ACCESS_KEY: z.string().min(1),
   S3_SECRET_KEY: z.string().min(1),

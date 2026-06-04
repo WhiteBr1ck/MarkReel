@@ -42,7 +42,7 @@ async function ensureAdminUser() {
   });
 }
 
-async function bootstrap() {
+export async function buildApp() {
   const app = Fastify({ logger: true });
 
   app.setErrorHandler((err, _req, reply) => {
@@ -63,6 +63,11 @@ async function bootstrap() {
       return reply.code(503).send({ error: "object_storage_unavailable" });
     }
 
+    const statusCode = (err as any)?.statusCode;
+    if (typeof statusCode === "number" && statusCode >= 400 && statusCode < 500) {
+      return reply.code(statusCode).send({ error: (err as any)?.code ?? "request_error" });
+    }
+
     reply.log.error(err);
     return reply.code(500).send({ error: "internal_server_error" });
   });
@@ -79,6 +84,10 @@ async function bootstrap() {
     limits: {
       fileSize: 1024 * 1024 * 1024 // 1GB (MVP default)
     }
+  });
+
+  app.addContentTypeParser("*", (_req, payload, done) => {
+    done(null, payload);
   });
 
   if (env.MARKREEL_STORE !== "inmemory") {
@@ -111,21 +120,33 @@ async function bootstrap() {
         const { annotationRoutes } = await import("./routes/annotations");
         const { attachmentRoutes } = await import("./routes/attachments");
         const { shareLinkRoutes } = await import("./routes/shareLinks");
+        const { projectMemberRoutes } = await import("./routes/projectMembers");
+        const { objectRoutes } = await import("./routes/objects");
         await mediaRoutes(apiScope);
         await folderRoutes(apiScope);
         await annotationRoutes(apiScope);
         await attachmentRoutes(apiScope);
         await shareLinkRoutes(apiScope);
+        await projectMemberRoutes(apiScope);
+        await objectRoutes(apiScope);
       }
     },
     { prefix: "/api" }
   );
 
+  return app;
+}
+
+async function bootstrap() {
+  const app = await buildApp();
+
   await app.listen({ host: "0.0.0.0", port: 4000 });
 }
 
-bootstrap().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error(err);
-  process.exit(1);
-});
+if (process.env.MARKREEL_SKIP_BOOTSTRAP !== "true") {
+  bootstrap().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error(err);
+    process.exit(1);
+  });
+}

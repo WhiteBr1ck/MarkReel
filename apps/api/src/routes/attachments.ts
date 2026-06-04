@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { nanoid } from "nanoid";
 import { env } from "../env";
-import { presignPutObject } from "../s3";
+import { putObjectStream } from "../s3";
 import { getUserId, requireUser } from "../auth/requireUser";
 import { auditLog } from "../audit";
 
@@ -21,11 +21,7 @@ export async function attachmentRoutes(app: FastifyInstance) {
     const objectKey = input.filename.startsWith("markup-")
       ? `attachments/markup/${nanoid(18)}.${ext}`
       : `attachments/${nanoid(18)}.${ext}`;
-    const url = await presignPutObject({
-      bucket: env.S3_BUCKET_ATTACHMENTS,
-      objectKey,
-      contentType: input.contentType
-    });
+    const url = `/api/attachments/upload/file?objectKey=${encodeURIComponent(objectKey)}`;
 
     await auditLog({
       req,
@@ -44,5 +40,22 @@ export async function attachmentRoutes(app: FastifyInstance) {
         bucket: env.S3_BUCKET_ATTACHMENTS
       }
     });
+  });
+
+  app.put("/attachments/upload/file", { preHandler: requireUser }, async (req, reply) => {
+    const objectKey = String((req.query as any).objectKey ?? "");
+    if (!objectKey.startsWith("attachments/")) {
+      return reply.code(400).send({ error: "invalid_object_key" });
+    }
+
+    await putObjectStream({
+      bucket: env.S3_BUCKET_ATTACHMENTS,
+      objectKey,
+      body: req.raw,
+      contentType: req.headers["content-type"] ?? undefined,
+      contentLength: req.headers["content-length"] ? Number(req.headers["content-length"]) : undefined
+    });
+
+    return reply.send({ ok: true, objectKey });
   });
 }

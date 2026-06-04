@@ -5,11 +5,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certi
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
+COPY apps/api/package.json ./apps/api/package.json
 COPY apps/worker/package.json ./apps/worker/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
 
 RUN npm install
 
+COPY apps/api ./apps/api
 COPY apps/worker ./apps/worker
 COPY packages/shared ./packages/shared
 COPY infra ./infra

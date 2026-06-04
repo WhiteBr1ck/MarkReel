@@ -2977,6 +2977,19 @@ html[data-theme="light"] .mr-dialog {
   font-size: 13px;
 }
 
+.mr-collab-row {
+  grid-template-columns: minmax(0, 1.2fr) minmax(170px, 0.8fr) auto;
+  align-items: end;
+}
+
+.mr-collab-row .mr-page__actions {
+  flex-wrap: wrap;
+}
+
+.mr-page__user-row select.mr-input {
+  min-width: 140px;
+}
+
 .mr-home {
   min-height: 100vh;
   padding: 40px 20px 64px;

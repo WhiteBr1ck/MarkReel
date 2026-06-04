@@ -4,6 +4,7 @@ import { auditLog } from "../audit";
 import { getUserId, requireUser } from "../auth/requireUser";
 import { getStore } from "../store";
 import { prisma } from "../db";
+import { getProjectAccess, hasCapability } from "../access";
 
 const CreateProjectSchema = z.object({
   name: z.string().min(1).max(120)
@@ -110,6 +111,12 @@ export async function projectRoutes(app: FastifyInstance) {
     const input = UpdateProjectSchema.parse(req.body);
 
     const store = getStore();
+    if (store.kind !== "inmemory") {
+      const access = await getProjectAccess({ userId, projectId });
+      if (!access) return reply.code(404).send({ error: "not_found" });
+      if (!hasCapability(access, "project:edit_assets")) return reply.code(403).send({ error: "forbidden" });
+    }
+
     const project = await store.projectRenameForUser({ userId, projectId, name: input.name });
     if (!project) return reply.code(404).send({ error: "not_found" });
 
@@ -130,6 +137,12 @@ export async function projectRoutes(app: FastifyInstance) {
     const projectId = (req.params as any).projectId as string;
 
     const store = getStore();
+    if (store.kind !== "inmemory") {
+      const access = await getProjectAccess({ userId, projectId });
+      if (!access) return reply.code(404).send({ error: "not_found" });
+      if (!hasCapability(access, "project:delete")) return reply.code(403).send({ error: "forbidden" });
+    }
+
     const project = await store.projectDeleteForUser({ userId, projectId });
     if (!project) return reply.code(404).send({ error: "not_found" });
 

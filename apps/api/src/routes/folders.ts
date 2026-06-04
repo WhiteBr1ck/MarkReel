@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db";
 import { auditLog } from "../audit";
+import { getProjectAccess, hasCapability } from "../access";
 import { getUserId, requireUser } from "../auth/requireUser";
 
 const CreateFolderSchema = z.object({
@@ -34,25 +35,15 @@ async function markFolderDeleted(folderId: string) {
   });
 }
 
-async function assertProjectAccess(userId: string, projectId: string) {
-  return prisma.project.findFirst({
-    where: {
-      id: projectId,
-      deletedAt: null,
-      OR: [{ ownerId: userId }, { members: { some: { userId } } }]
-    },
-    select: { id: true }
-  });
-}
-
 export async function folderRoutes(app: FastifyInstance) {
   app.post("/projects/:projectId/folders", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const projectId = (req.params as any).projectId as string;
     const input = CreateFolderSchema.parse(req.body);
 
-    const project = await assertProjectAccess(userId, projectId);
-    if (!project) return reply.code(404).send({ error: "not_found" });
+    const access = await getProjectAccess({ userId, projectId });
+    if (!access) return reply.code(404).send({ error: "not_found" });
+    if (!hasCapability(access, "project:edit_assets")) return reply.code(403).send({ error: "forbidden" });
 
     if (input.parentId) {
       const parent = await prisma.projectFolder.findFirst({
@@ -96,17 +87,13 @@ export async function folderRoutes(app: FastifyInstance) {
     const input = UpdateFolderSchema.parse(req.body);
 
     const folder = await prisma.projectFolder.findFirst({
-      where: {
-        id: folderId,
-        deletedAt: null,
-        project: {
-          deletedAt: null,
-          OR: [{ ownerId: userId }, { members: { some: { userId } } }]
-        }
-      },
-      select: { id: true }
+      where: { id: folderId, deletedAt: null },
+      select: { id: true, projectId: true }
     });
     if (!folder) return reply.code(404).send({ error: "not_found" });
+    const access = await getProjectAccess({ userId, projectId: folder.projectId });
+    if (!access) return reply.code(404).send({ error: "not_found" });
+    if (!hasCapability(access, "project:edit_assets")) return reply.code(403).send({ error: "forbidden" });
 
     const updated = await prisma.projectFolder.update({
       where: { id: folderId },
@@ -138,17 +125,13 @@ export async function folderRoutes(app: FastifyInstance) {
     const folderId = (req.params as any).folderId as string;
 
     const folder = await prisma.projectFolder.findFirst({
-      where: {
-        id: folderId,
-        deletedAt: null,
-        project: {
-          deletedAt: null,
-          OR: [{ ownerId: userId }, { members: { some: { userId } } }]
-        }
-      },
-      select: { id: true, name: true }
+      where: { id: folderId, deletedAt: null },
+      select: { id: true, name: true, projectId: true }
     });
     if (!folder) return reply.code(404).send({ error: "not_found" });
+    const access = await getProjectAccess({ userId, projectId: folder.projectId });
+    if (!access) return reply.code(404).send({ error: "not_found" });
+    if (!hasCapability(access, "project:edit_assets")) return reply.code(403).send({ error: "forbidden" });
 
     await markFolderDeleted(folderId);
 

@@ -1,10 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { env } from "../env";
 
 export const ACCESS_COOKIE = "mr_access";
 export const REFRESH_COOKIE = "mr_refresh";
-export const serverInstanceId = randomUUID();
+export const authInstanceId = env.JWT_AUTH_INSTANCE_ID ?? createHash("sha256").update(env.JWT_REFRESH_SECRET).digest("hex").slice(0, 32);
 
 export type AuthTokenPayload = {
   sub: string;
@@ -39,7 +39,7 @@ export async function setAuthCookies(reply: any, payload: { userId: string; sess
   const tokenPayload: AuthTokenPayload = {
     sub: payload.userId,
     sv: payload.sessionVersion,
-    si: serverInstanceId
+    si: authInstanceId
   };
 
   const accessToken = await reply.jwtSign(tokenPayload, {

@@ -3,9 +3,9 @@ import { z } from "zod";
 import { hashPassword, verifyPassword } from "../auth/password";
 import {
   REFRESH_COOKIE,
+  authInstanceId,
   clearAuthCookies,
   parseAuthTokenPayload,
-  serverInstanceId,
   setAuthCookies
 } from "../auth/tokens";
 import { env } from "../env";
@@ -50,6 +50,10 @@ async function toApiUser(user: StoreUser) {
 
 export async function authRoutes(app: FastifyInstance) {
   app.post("/auth/register", async (req, reply) => {
+    if (!env.MARKREEL_ALLOW_PUBLIC_REGISTRATION) {
+      return reply.code(403).send({ error: "public_registration_disabled" });
+    }
+
     const input = RegisterSchema.parse(req.body);
 
     const store = getStore();
@@ -76,11 +80,15 @@ export async function authRoutes(app: FastifyInstance) {
     if (!user) {
       return reply.code(401).send({ error: "invalid_credentials" });
     }
+    if (user.disabledAt) {
+      return reply.code(403).send({ error: "account_disabled" });
+    }
     const ok = await verifyPassword(input.password, user.passwordHash);
     if (!ok) {
       return reply.code(401).send({ error: "invalid_credentials" });
     }
 
+    await store.userRecordLogin({ userId: user.id });
     await setAuthCookies(reply, { userId: user.id, sessionVersion: user.sessionVersion });
     return reply.send({ user: await toApiUser(user) });
   });
@@ -92,13 +100,13 @@ export async function authRoutes(app: FastifyInstance) {
         cookie: { cookieName: REFRESH_COOKIE }
       });
       const payload = parseAuthTokenPayload(rawPayload);
-      if (!payload || payload.si !== serverInstanceId) {
+      if (!payload || payload.si !== authInstanceId) {
         clearAuthCookies(reply);
         return reply.code(401).send({ error: "unauthorized" });
       }
 
       const user = await getStore().userFindById(payload.sub);
-      if (!user || user.sessionVersion !== payload.sv) {
+      if (!user || user.disabledAt || user.sessionVersion !== payload.sv) {
         clearAuthCookies(reply);
         return reply.code(401).send({ error: "unauthorized" });
       }

@@ -6,7 +6,7 @@ import { clearAuthCookies, setAuthCookies } from "../auth/tokens";
 import { auditLog } from "../audit";
 import { getStore } from "../store";
 import { env } from "../env";
-import { presignGetObject, presignPutObject } from "../s3";
+import { presignGetObject, putObjectStream } from "../s3";
 import type { StoreUser } from "../store/types";
 
 const UpdateProfileSchema = z.object({
@@ -88,11 +88,7 @@ export async function userRoutes(app: FastifyInstance) {
     const input = PresignAvatarSchema.parse(req.body);
     const ext = input.filename.includes(".") ? input.filename.split(".").pop()!.slice(0, 10) : "bin";
     const objectKey = `avatars/${currentUser.id}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
-    const url = await presignPutObject({
-      bucket: env.S3_BUCKET_ATTACHMENTS,
-      objectKey,
-      contentType: input.contentType
-    });
+    const url = `/api/users/me/avatar/upload?objectKey=${encodeURIComponent(objectKey)}`;
 
     await auditLog({
       req,
@@ -112,6 +108,24 @@ export async function userRoutes(app: FastifyInstance) {
         contentType: input.contentType
       }
     });
+  });
+
+  app.put("/users/me/avatar/upload", { preHandler: requireUser }, async (req, reply) => {
+    const currentUser = getCurrentUser(req);
+    const objectKey = String((req.query as any).objectKey ?? "");
+    if (!objectKey.startsWith(`avatars/${currentUser.id}/`)) {
+      return reply.code(400).send({ error: "invalid_object_key" });
+    }
+
+    await putObjectStream({
+      bucket: env.S3_BUCKET_ATTACHMENTS,
+      objectKey,
+      body: req.raw,
+      contentType: req.headers["content-type"] ?? undefined,
+      contentLength: req.headers["content-length"] ? Number(req.headers["content-length"]) : undefined
+    });
+
+    return reply.send({ ok: true, objectKey });
   });
 
   app.post("/users/me/change-password", { preHandler: requireUser }, async (req, reply) => {

@@ -5,6 +5,7 @@ import Link from "next/link";
 import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Dialog } from "../_components/dialog";
+import { api } from "../_components/api";
 
 type ApiUser = {
   id: string;
@@ -60,27 +61,12 @@ function sanitizeWorkbenchHref(value: string | null): string {
   }
 }
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-  if (init?.body != null && !headers.has("content-type")) {
-    headers.set("content-type", "application/json");
-  }
-
-  const res = await fetch(`/api${path}`, {
-    ...init,
-    headers,
-    credentials: "include"
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error("api_error"), { status: res.status, data });
-  return data as T;
-}
-
 function toZhError(e: any) {
   const code = e?.data?.error as string | undefined;
   const map: Record<string, string> = {
     unauthorized: "登录已失效，请重新登录。",
     invalid_credentials: "当前密码不正确。",
+    account_disabled: "这个账号已被管理员停用。",
     object_storage_unavailable: "对象存储当前不可用，请稍后再试。",
     validation_error: "提交内容不符合要求。",
     not_found: "账号不存在或已被删除。"

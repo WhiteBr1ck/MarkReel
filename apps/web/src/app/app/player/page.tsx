@@ -5,6 +5,7 @@ import type { ChangeEvent, ClipboardEvent, PointerEvent as ReactPointerEvent, Re
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Dialog } from "../_components/dialog";
+import { api } from "../_components/api";
 
 type MediaDetail = {
   id: string;
@@ -123,15 +124,6 @@ const UI_HIDE_DELAY_MS = 2000;
 
 function PlayerIcon({ children }: { children: ReactNode }) {
   return <span className="mr-player-page__icon-glyph" aria-hidden="true">{children}</span>;
-}
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-  if (init?.body != null && !headers.has("content-type")) headers.set("content-type", "application/json");
-  const res = await fetch(`/api${path}`, { ...init, headers, credentials: "include" });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error("api_error"), { status: res.status, data });
-  return data as T;
 }
 
 function uploadToPresignedUrl(url: string, file: File) {

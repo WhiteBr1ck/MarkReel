@@ -2,12 +2,18 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { nanoid } from "nanoid";
 import { execFile } from "node:child_process";
+import { createWriteStream } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import { prisma } from "../db";
 import { getUserId, requireUser } from "../auth/requireUser";
-import { presignGetObject, presignPutObject, statObject, getObjectStream } from "../s3";
+import { presignGetObject, putObjectStream, statObject, getObjectStream } from "../s3";
 import { env } from "../env";
 import { auditLog } from "../audit";
+import { getMediaProjectAccess, getProjectAccess, hasCapability } from "../access";
 import { mediaQueue } from "../queue";
 
 const CreateMediaSchema = z.object({
@@ -93,20 +99,32 @@ async function readMediaMetadata(objectKey: string) {
     objectKey
   });
 
-  const mediaUrl = await presignGetObject({
+  const object = await getObjectStream({
     bucket: env.S3_BUCKET_ORIGINAL,
-    objectKey,
-    expiresInSeconds: 900
+    objectKey
   });
-  const { stdout } = await execFileAsync("ffprobe", [
-    "-v",
-    "error",
-    "-show_format",
-    "-show_streams",
-    "-of",
-    "json",
-    mediaUrl
-  ]);
+
+  if (!object.body) throw new Error(`Missing readable body for s3://${env.S3_BUCKET_ORIGINAL}/${objectKey}`);
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "markreel-api-"));
+  const inputPath = path.join(tempDir, "metadata-source");
+
+  let stdout: string;
+  try {
+    await pipeline(object.body, createWriteStream(inputPath));
+    const result = await execFileAsync("ffprobe", [
+      "-v",
+      "error",
+      "-show_format",
+      "-show_streams",
+      "-of",
+      "json",
+      inputPath
+    ]);
+    stdout = result.stdout;
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
 
   const parsed = FfprobeResultSchema.parse(JSON.parse(stdout));
   const videoStream = parsed.streams?.find((stream) => stream.codec_type === "video");
@@ -166,45 +184,21 @@ async function getPreviewTargetForMedia(mediaId: string) {
   return { media, target };
 }
 
-async function assertProjectAccess(userId: string, projectId: string) {
-  const project = await prisma.project.findFirst({
-    where: {
-      id: projectId,
-      deletedAt: null,
-      OR: [{ ownerId: userId }, { members: { some: { userId } } }]
-    },
-    select: { id: true }
-  });
-  return !!project;
+async function assertProjectAccess(userId: string, projectId: string, capability: "project:view" | "project:edit_assets" = "project:view") {
+  const access = await getProjectAccess({ userId, projectId });
+  return access && hasCapability(access, capability) ? access : null;
 }
 
-async function assertMediaAccess(userId: string, mediaId: string) {
-  const media = await prisma.media.findFirst({
-    where: {
-      id: mediaId,
-      deletedAt: null,
-      project: {
-        deletedAt: null,
-        OR: [{ ownerId: userId }, { members: { some: { userId } } }]
-      }
-    },
-    select: { id: true, projectId: true }
-  });
-  return media;
+async function assertMediaAccess(userId: string, mediaId: string, capability: "project:view" | "project:edit_assets" = "project:view") {
+  const result = await getMediaProjectAccess({ userId, mediaId });
+  if (!result || !hasCapability(result.access, capability)) return null;
+  return { id: result.media.id, projectId: result.media.projectId };
 }
 
-async function assertMediaAccessIncludingDeleted(userId: string, mediaId: string) {
-  const media = await prisma.media.findFirst({
-    where: {
-      id: mediaId,
-      project: {
-        deletedAt: null,
-        OR: [{ ownerId: userId }, { members: { some: { userId } } }]
-      }
-    },
-    select: { id: true, projectId: true, deletedAt: true }
-  });
-  return media;
+async function assertMediaAccessIncludingDeleted(userId: string, mediaId: string, capability: "project:view" | "project:edit_assets" = "project:view") {
+  const result = await getMediaProjectAccess({ userId, mediaId, includeDeleted: true });
+  if (!result || !hasCapability(result.access, capability)) return null;
+  return { id: result.media.id, projectId: result.media.projectId, deletedAt: result.media.deletedAt };
 }
 
 async function assertFolderAccess(projectId: string, folderId: string | null | undefined) {
@@ -295,7 +289,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       const projectId = (req.params as any).projectId as string;
       const input = CreateMediaSchema.parse(req.body);
 
-      const ok = await assertProjectAccess(userId, projectId);
+      const ok = await assertProjectAccess(userId, projectId, "project:edit_assets");
       if (!ok) return reply.code(404).send({ error: "not_found" });
 
       const folderOk = await assertFolderAccess(projectId, input.folderId ?? null);
@@ -344,7 +338,7 @@ export async function mediaRoutes(app: FastifyInstance) {
     const userId = getUserId(req);
     const mediaId = (req.params as any).mediaId as string;
     const input = UpdateMediaSchema.parse(req.body);
-    const access = await assertMediaAccess(userId, mediaId);
+    const access = await assertMediaAccess(userId, mediaId, input.rating !== undefined && input.title === undefined && input.folderId === undefined ? "project:view" : "project:edit_assets");
     if (!access) return reply.code(404).send({ error: "not_found" });
 
     if (input.folderId !== undefined) {
@@ -399,7 +393,7 @@ export async function mediaRoutes(app: FastifyInstance) {
   app.delete("/media/:mediaId", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const mediaId = (req.params as any).mediaId as string;
-    const access = await assertMediaAccess(userId, mediaId);
+    const access = await assertMediaAccess(userId, mediaId, "project:edit_assets");
     if (!access) return reply.code(404).send({ error: "not_found" });
 
     const media = await prisma.media.update({
@@ -423,7 +417,7 @@ export async function mediaRoutes(app: FastifyInstance) {
   app.get("/projects/:projectId/trash", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const projectId = (req.params as any).projectId as string;
-    const ok = await assertProjectAccess(userId, projectId);
+    const ok = await assertProjectAccess(userId, projectId, "project:view");
     if (!ok) return reply.code(404).send({ error: "not_found" });
 
     const items = await prisma.media.findMany({
@@ -470,7 +464,7 @@ export async function mediaRoutes(app: FastifyInstance) {
   app.post("/media/:mediaId/restore", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const mediaId = (req.params as any).mediaId as string;
-    const access = await assertMediaAccessIncludingDeleted(userId, mediaId);
+    const access = await assertMediaAccessIncludingDeleted(userId, mediaId, "project:edit_assets");
     if (!access || !access.deletedAt) return reply.code(404).send({ error: "not_found" });
 
     const media = await prisma.media.update({
@@ -494,7 +488,7 @@ export async function mediaRoutes(app: FastifyInstance) {
   app.delete("/projects/:projectId/trash", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const projectId = (req.params as any).projectId as string;
-    const ok = await assertProjectAccess(userId, projectId);
+    const ok = await assertProjectAccess(userId, projectId, "project:edit_assets");
     if (!ok) return reply.code(404).send({ error: "not_found" });
 
     const trashed = await prisma.media.findMany({
@@ -706,7 +700,7 @@ export async function mediaRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const userId = getUserId(req);
       const mediaId = (req.params as any).mediaId as string;
-      const access = await assertMediaAccess(userId, mediaId);
+      const access = await assertMediaAccess(userId, mediaId, "project:edit_assets");
       if (!access) return reply.code(404).send({ error: "not_found" });
 
       const input = PresignVideoSchema.parse(req.body);
@@ -715,11 +709,7 @@ export async function mediaRoutes(app: FastifyInstance) {
         : "bin";
 
       const objectKey = `original/${mediaId}/${nanoid(16)}.${ext}`;
-      const url = await presignPutObject({
-        bucket: env.S3_BUCKET_ORIGINAL,
-        objectKey,
-        contentType: input.contentType
-      });
+      const url = `/api/media/${mediaId}/upload/file?objectKey=${encodeURIComponent(objectKey)}`;
 
       await auditLog({
         req,
@@ -742,10 +732,32 @@ export async function mediaRoutes(app: FastifyInstance) {
     }
   );
 
+  app.put("/media/:mediaId/upload/file", { preHandler: requireUser }, async (req, reply) => {
+    const userId = getUserId(req);
+    const mediaId = (req.params as any).mediaId as string;
+    const access = await assertMediaAccess(userId, mediaId, "project:edit_assets");
+    if (!access) return reply.code(404).send({ error: "not_found" });
+
+    const objectKey = String((req.query as any).objectKey ?? "");
+    if (!objectKey.startsWith(`original/${mediaId}/`)) {
+      return reply.code(400).send({ error: "invalid_object_key" });
+    }
+
+    await putObjectStream({
+      bucket: env.S3_BUCKET_ORIGINAL,
+      objectKey,
+      body: req.raw,
+      contentType: req.headers["content-type"] ?? undefined,
+      contentLength: req.headers["content-length"] ? Number(req.headers["content-length"]) : undefined
+    });
+
+    return reply.send({ ok: true, objectKey });
+  });
+
   app.post("/media/:mediaId/process", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const mediaId = (req.params as any).mediaId as string;
-    const access = await assertMediaAccess(userId, mediaId);
+    const access = await assertMediaAccess(userId, mediaId, "project:edit_assets");
     if (!access) return reply.code(404).send({ error: "not_found" });
 
     const input = EnqueueSchema.parse(req.body);

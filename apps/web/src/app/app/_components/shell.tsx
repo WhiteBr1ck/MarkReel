@@ -21,7 +21,16 @@ export type ApiUser = {
   avatarPreset?: string | null;
   globalRole?: "admin" | "user";
 };
-export type Project = { id: string; name: string; ownerId: string; createdAt: string; updatedAt: string };
+export type Project = {
+  id: string;
+  name: string;
+  ownerId: string;
+  createdAt: string;
+  updatedAt: string;
+  role?: "owner" | "editor" | "commenter" | "viewer";
+  accessSource?: "owner" | "member";
+  capabilities?: string[];
+};
 
 export type FolderNode = {
   id: string;

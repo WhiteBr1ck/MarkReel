@@ -1,4 +1,5 @@
-import type { Store, StoreUser, StoreUserProfile } from "./types";
+import type { Store, StoreProject, StoreUser, StoreUserProfile } from "./types";
+import { capabilitiesForRole, type ProjectRole } from "../access";
 import { createRandomAvatarPreset } from "../avatarPresets";
 import { prisma } from "../db";
 
@@ -12,6 +13,8 @@ function toStoreUser(u: {
   avatarPreset: string | null;
   globalRole: "admin" | "user";
   sessionVersion: number;
+  lastLoginAt: Date | null;
+  disabledAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
   deletedAt: Date | null;
@@ -26,6 +29,8 @@ function toStoreUser(u: {
     avatarPreset: u.avatarPreset,
     globalRole: u.globalRole,
     sessionVersion: u.sessionVersion,
+    lastLoginAt: u.lastLoginAt,
+    disabledAt: u.disabledAt,
     createdAt: u.createdAt,
     updatedAt: u.updatedAt,
     deletedAt: u.deletedAt
@@ -41,9 +46,24 @@ function toStoreUserProfile(user: StoreUser): StoreUserProfile {
     avatarContentType: user.avatarContentType,
     avatarPreset: user.avatarPreset,
     globalRole: user.globalRole,
+    lastLoginAt: user.lastLoginAt,
+    disabledAt: user.disabledAt,
     createdAt: user.createdAt,
-    updatedAt: user.updatedAt
+    updatedAt: user.updatedAt,
+    deletedAt: user.deletedAt
   };
+}
+
+function withProjectAccess<T extends { id: string; ownerId: string; members?: Array<{ role: ProjectRole }> }>(project: T, userId: string): Omit<T, "members"> & StoreProject {
+  const role = project.ownerId === userId ? "owner" : project.members?.[0]?.role ?? "viewer";
+  const accessSource = project.ownerId === userId ? "owner" : "member";
+  const { members: _members, ...rest } = project;
+  return {
+    ...rest,
+    role,
+    accessSource,
+    capabilities: capabilitiesForRole(role)
+  } as Omit<T, "members"> & StoreProject;
 }
 
 export function createPrismaStore(): Store {
@@ -72,7 +92,8 @@ export function createPrismaStore(): Store {
           passwordHash: args.passwordHash,
           displayName: args.displayName,
           avatarPreset: createRandomAvatarPreset(),
-          globalRole: args.globalRole ?? "user"
+          globalRole: args.globalRole ?? "user",
+          disabledAt: null
         },
         update: {
           passwordHash: args.passwordHash,
@@ -82,6 +103,7 @@ export function createPrismaStore(): Store {
           avatarPreset: createRandomAvatarPreset(),
           globalRole: args.globalRole ?? "user",
           sessionVersion: 1,
+          disabledAt: null,
           deletedAt: null
         }
       });
@@ -96,6 +118,7 @@ export function createPrismaStore(): Store {
           where: { id: existing.id },
           data: {
             globalRole: "admin",
+            disabledAt: null,
             deletedAt: null
           }
         });
@@ -108,7 +131,8 @@ export function createPrismaStore(): Store {
           passwordHash: args.passwordHash,
           displayName: args.displayName,
           avatarPreset: createRandomAvatarPreset(),
-          globalRole: "admin"
+          globalRole: "admin",
+          disabledAt: null
         }
       });
       return toStoreUser(user);
@@ -142,9 +166,19 @@ export function createPrismaStore(): Store {
       return toStoreUser(user);
     },
 
-    async userList() {
+    async userRecordLogin(args) {
+      const existing = await prisma.user.findUnique({ where: { id: args.userId } });
+      if (!existing || existing.deletedAt) return null;
+      const user = await prisma.user.update({
+        where: { id: args.userId },
+        data: { lastLoginAt: new Date() }
+      });
+      return toStoreUser(user);
+    },
+
+    async userList(args) {
       const rows = await prisma.user.findMany({
-        where: { deletedAt: null },
+        where: args?.includeDeleted ? {} : { deletedAt: null },
         orderBy: [{ createdAt: "asc" }]
       });
       return rows.map((row) => toStoreUserProfile(toStoreUser(row)));
@@ -168,6 +202,7 @@ export function createPrismaStore(): Store {
             avatarPreset: createRandomAvatarPreset(),
             globalRole: args.globalRole ?? "user",
             sessionVersion: 1,
+            disabledAt: null,
             deletedAt: null
           }
         });
@@ -179,7 +214,8 @@ export function createPrismaStore(): Store {
           passwordHash: args.passwordHash,
           displayName: args.displayName,
           avatarPreset: createRandomAvatarPreset(),
-          globalRole: args.globalRole ?? "user"
+          globalRole: args.globalRole ?? "user",
+          disabledAt: null
         }
       });
       return toStoreUser(user);
@@ -191,7 +227,8 @@ export function createPrismaStore(): Store {
       const user = await prisma.user.update({
         where: { id: args.userId },
         data: {
-          displayName: args.displayName
+          displayName: args.displayName,
+          ...(args.globalRole ? { globalRole: args.globalRole } : {})
         }
       });
       return toStoreUser(user);
@@ -223,6 +260,33 @@ export function createPrismaStore(): Store {
       return toStoreUser(user);
     },
 
+    async adminSetUserDisabled(args) {
+      const existing = await prisma.user.findUnique({ where: { id: args.userId } });
+      if (!existing || existing.deletedAt) return null;
+      const user = await prisma.user.update({
+        where: { id: args.userId },
+        data: {
+          disabledAt: args.disabled ? new Date() : null,
+          sessionVersion: existing.sessionVersion + 1
+        }
+      });
+      return toStoreUser(user);
+    },
+
+    async adminRestoreUser(args) {
+      const existing = await prisma.user.findUnique({ where: { id: args.userId } });
+      if (!existing || !existing.deletedAt) return null;
+      const user = await prisma.user.update({
+        where: { id: args.userId },
+        data: {
+          deletedAt: null,
+          disabledAt: null,
+          sessionVersion: existing.sessionVersion + 1
+        }
+      });
+      return toStoreUser(user);
+    },
+
     async projectListForUser(userId) {
       const rows = await prisma.project.findMany({
         where: {
@@ -230,9 +294,16 @@ export function createPrismaStore(): Store {
           OR: [{ ownerId: userId }, { members: { some: { userId } } }]
         },
         orderBy: { updatedAt: "desc" },
-        select: { id: true, name: true, ownerId: true, createdAt: true, updatedAt: true }
+        select: {
+          id: true,
+          name: true,
+          ownerId: true,
+          createdAt: true,
+          updatedAt: true,
+          members: { where: { userId }, select: { role: true }, take: 1 }
+        }
       });
-      return rows;
+      return rows.map((row) => withProjectAccess(row, userId));
     },
 
     async projectCreate({ userId, name }) {
@@ -259,14 +330,25 @@ export function createPrismaStore(): Store {
           deletedAt: null,
           OR: [{ ownerId: userId }, { members: { some: { userId } } }]
         },
-        select: { id: true, name: true, ownerId: true, createdAt: true, updatedAt: true }
+        select: {
+          id: true,
+          name: true,
+          ownerId: true,
+          createdAt: true,
+          updatedAt: true,
+          members: { where: { userId }, select: { role: true }, take: 1 }
+        }
       });
-      return project;
+      return project ? withProjectAccess(project, userId) : null;
     },
 
     async projectRenameForUser({ userId, projectId, name }) {
       const project = await prisma.project.findFirst({
-        where: { id: projectId, ownerId: userId, deletedAt: null },
+        where: {
+          id: projectId,
+          deletedAt: null,
+          OR: [{ ownerId: userId }, { members: { some: { userId, role: { in: ["owner", "editor"] } } } }]
+        },
         select: { id: true }
       });
       if (!project) return null;

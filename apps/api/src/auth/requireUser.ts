@@ -1,6 +1,6 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { getStore } from "../store";
-import { ACCESS_COOKIE, clearAuthCookies, parseAuthTokenPayload, serverInstanceId } from "./tokens";
+import { ACCESS_COOKIE, authInstanceId, clearAuthCookies, parseAuthTokenPayload } from "./tokens";
 import type { UserGlobalRole } from "../store/types";
 
 export type CurrentUser = {
@@ -18,13 +18,13 @@ export async function requireUser(req: FastifyRequest, reply: FastifyReply) {
   try {
     const rawPayload = await (req as any).jwtVerify({ cookie: { cookieName: ACCESS_COOKIE } });
     const payload = parseAuthTokenPayload(rawPayload);
-    if (!payload || payload.si !== serverInstanceId) {
+    if (!payload || payload.si !== authInstanceId) {
       clearAuthCookies(reply);
       return reply.code(401).send({ error: "unauthorized" });
     }
 
     const user = await getStore().userFindById(payload.sub);
-    if (!user || user.sessionVersion !== payload.sv) {
+    if (!user || user.disabledAt || user.sessionVersion !== payload.sv) {
       clearAuthCookies(reply);
       return reply.code(401).send({ error: "unauthorized" });
     }

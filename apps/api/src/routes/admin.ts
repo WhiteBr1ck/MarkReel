@@ -13,7 +13,8 @@ const CreateAdminUserSchema = z.object({
 });
 
 const UpdateAdminUserProfileSchema = z.object({
-  displayName: z.string().trim().min(1).max(80).nullable()
+  displayName: z.string().trim().min(1).max(80).nullable(),
+  globalRole: z.enum(["admin", "user"]).optional()
 });
 
 const ResetAdminUserPasswordSchema = z.object({
@@ -22,7 +23,18 @@ const ResetAdminUserPasswordSchema = z.object({
 
 type AdminUserShape = Pick<
   StoreUser,
-  "id" | "username" | "displayName" | "avatarObjectKey" | "avatarContentType" | "avatarPreset" | "globalRole" | "createdAt" | "updatedAt"
+  | "id"
+  | "username"
+  | "displayName"
+  | "avatarObjectKey"
+  | "avatarContentType"
+  | "avatarPreset"
+  | "globalRole"
+  | "lastLoginAt"
+  | "disabledAt"
+  | "createdAt"
+  | "updatedAt"
+  | "deletedAt"
 >;
 
 function toAdminUser(user: AdminUserShape) {
@@ -34,14 +46,17 @@ function toAdminUser(user: AdminUserShape) {
     avatarContentType: user.avatarContentType,
     avatarPreset: user.avatarPreset,
     globalRole: user.globalRole,
+    lastLoginAt: user.lastLoginAt,
+    disabledAt: user.disabledAt,
     createdAt: user.createdAt,
-    updatedAt: user.updatedAt
+    updatedAt: user.updatedAt,
+    deletedAt: user.deletedAt
   };
 }
 
 export async function adminRoutes(app: FastifyInstance) {
   app.get("/admin/users", { preHandler: requireAdmin }, async () => {
-    const users = await getStore().userList();
+    const users = await getStore().userList({ includeDeleted: true });
     return { users: users.map((user) => toAdminUser(user)) };
   });
 
@@ -79,9 +94,13 @@ export async function adminRoutes(app: FastifyInstance) {
     const actor = getCurrentUser(req);
     const userId = (req.params as { userId: string }).userId;
     const input = UpdateAdminUserProfileSchema.parse(req.body);
+    if (userId === actor.id && input.globalRole === "user") {
+      return reply.code(400).send({ error: "cannot_demote_self" });
+    }
     const user = await getStore().adminUpdateUserProfile({
       userId,
-      displayName: input.displayName
+      displayName: input.displayName,
+      globalRole: input.globalRole
     });
     if (!user) return reply.code(404).send({ error: "not_found" });
 
@@ -91,7 +110,7 @@ export async function adminRoutes(app: FastifyInstance) {
       action: "admin.user.update",
       entityType: "User",
       entityId: user.id,
-      meta: { username: user.username, displayName: user.displayName }
+      meta: { username: user.username, displayName: user.displayName, globalRole: user.globalRole }
     });
 
     return reply.send({ user: toAdminUser(user) });
@@ -148,5 +167,63 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     return reply.send({ ok: true });
+  });
+
+  app.post("/admin/users/:userId/disable", { preHandler: requireAdmin }, async (req, reply) => {
+    const actor = getCurrentUser(req);
+    const userId = (req.params as { userId: string }).userId;
+    if (userId === actor.id) {
+      return reply.code(400).send({ error: "cannot_disable_self" });
+    }
+
+    const user = await getStore().adminSetUserDisabled({ userId, disabled: true });
+    if (!user) return reply.code(404).send({ error: "not_found" });
+
+    await auditLog({
+      req,
+      actorUserId: actor.id,
+      action: "admin.user.disable",
+      entityType: "User",
+      entityId: user.id,
+      meta: { username: user.username }
+    });
+
+    return reply.send({ user: toAdminUser(user) });
+  });
+
+  app.post("/admin/users/:userId/enable", { preHandler: requireAdmin }, async (req, reply) => {
+    const actor = getCurrentUser(req);
+    const userId = (req.params as { userId: string }).userId;
+    const user = await getStore().adminSetUserDisabled({ userId, disabled: false });
+    if (!user) return reply.code(404).send({ error: "not_found" });
+
+    await auditLog({
+      req,
+      actorUserId: actor.id,
+      action: "admin.user.enable",
+      entityType: "User",
+      entityId: user.id,
+      meta: { username: user.username }
+    });
+
+    return reply.send({ user: toAdminUser(user) });
+  });
+
+  app.post("/admin/users/:userId/restore", { preHandler: requireAdmin }, async (req, reply) => {
+    const actor = getCurrentUser(req);
+    const userId = (req.params as { userId: string }).userId;
+    const user = await getStore().adminRestoreUser({ userId });
+    if (!user) return reply.code(404).send({ error: "not_found" });
+
+    await auditLog({
+      req,
+      actorUserId: actor.id,
+      action: "admin.user.restore",
+      entityType: "User",
+      entityId: user.id,
+      meta: { username: user.username }
+    });
+
+    return reply.send({ user: toAdminUser(user) });
   });
 }

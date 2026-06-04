@@ -47,27 +47,53 @@ npm run dev:local:unix
 
 提示：当前默认是 `inmemory` 存储，重启 API 会清空已注册账号。
 
-## Docker 部署（后续上线用）
+## Docker Compose 一键运行（完整媒体链路）
 
-准备：
-
-```bash
-cp .env.example .env
-```
+当前 `docker-compose.yml` 会启动完整本地栈：
+- Web: Next.js，宿主机端口 `5090`
+- API: Fastify，仅 Docker 内部访问
+- Worker: BullMQ + ffmpeg/ffprobe，仅 Docker 内部运行
+- Redis: 队列，仅 Docker 内部访问
+- MinIO: S3 兼容对象存储，仅 Docker 内部访问
+- SQLite: Prisma 文件数据库，保存在 Docker volume `markreel_sqlite-data`
 
 启动：
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
 
 打开：
-- Web: http://localhost:5090
-- API: http://localhost:4000/api
-- MinIO 控制台: http://localhost:9001
+- Web: http://localhost:5090/app
+- API 和对象存储都通过 Web 的 `/api/*` 同源代理访问，宿主机不暴露额外端口。
+
+默认开发管理员账号：
+
+```text
+admin / adminpass123
+```
+
+查看状态和日志：
+
+```bash
+docker compose ps
+docker compose logs -f --tail=120 api worker web
+```
+
+停止：
+
+```bash
+docker compose down
+```
+
+清空本地数据（会删除账号、项目、媒体对象和队列数据）：
+
+```bash
+docker compose down -v
+```
 
 安全提示：
-- 在公网暴露前务必修改 `.env` 中的 `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET`。
+- 在公网暴露前务必修改 `.env.docker` 中的 `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` / `JWT_AUTH_INSTANCE_ID` / 管理员密码 / MinIO 密码。
 
 ## 从 inmemory 切换到 PostgreSQL（可还原）
 

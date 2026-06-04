@@ -2,13 +2,17 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { Dialog, NameDialog } from "../_components/dialog";
+import { Dialog } from "../_components/dialog";
+import { api } from "../_components/api";
 
 type AdminUser = {
   id: string;
   username: string;
   displayName: string | null;
   globalRole: "admin" | "user";
+  lastLoginAt: string | null;
+  disabledAt: string | null;
+  deletedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -36,28 +40,14 @@ function sanitizeWorkbenchHref(value: string | null): string {
   }
 }
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-  if (init?.body != null && !headers.has("content-type")) {
-    headers.set("content-type", "application/json");
-  }
-
-  const res = await fetch(`/api${path}`, {
-    ...init,
-    headers,
-    credentials: "include"
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error("api_error"), { status: res.status, data });
-  return data as T;
-}
-
 function toZhError(e: any) {
   const code = e?.data?.error as string | undefined;
   const map: Record<string, string> = {
     unauthorized: "登录已失效，请重新登录。",
     username_taken: "这个用户名已被占用。",
     cannot_delete_self: "不能删除当前管理员账号。",
+    cannot_disable_self: "不能停用当前管理员账号。",
+    cannot_demote_self: "不能把当前管理员降级为普通用户。",
     not_found: "目标用户不存在。",
     use_user_settings: "当前管理员自己的密码请到“用户设置”里修改。"
   };
@@ -77,6 +67,12 @@ function sortUsers(users: AdminUser[]) {
   return [...users].sort((a, b) => a.username.localeCompare(b.username, "zh-CN"));
 }
 
+function userStatusLabel(user: AdminUser) {
+  if (user.deletedAt) return "已删除";
+  if (user.disabledAt) return "已停用";
+  return "正常";
+}
+
 export default function AdminPage() {
   const [backHref, setBackHref] = useState("/app");
   const [viewer, setViewer] = useState<MeResponse["user"]>(null);
@@ -84,12 +80,15 @@ export default function AdminPage() {
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"active" | "disabled" | "deleted" | "all">("active");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
   const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
   const [editingDisplayName, setEditingDisplayName] = useState("");
+  const [editingGlobalRole, setEditingGlobalRole] = useState<AdminUser["globalRole"]>("user");
   const [resettingUser, setResettingUser] = useState<AdminUser | null>(null);
   const [resetPassword, setResetPassword] = useState("");
   const [resetPasswordConfirm, setResetPasswordConfirm] = useState("");
@@ -113,7 +112,18 @@ export default function AdminPage() {
     void load().catch((e) => setError(toZhError(e)));
   }, []);
 
-  const sortedUsers = useMemo(() => sortUsers(users), [users]);
+  const sortedUsers = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    return sortUsers(users).filter((user) => {
+      const matchesQuery = !keyword || user.username.includes(keyword) || user.displayName?.toLowerCase().includes(keyword);
+      const matchesStatus =
+        statusFilter === "all" ||
+        (statusFilter === "active" && !user.deletedAt && !user.disabledAt) ||
+        (statusFilter === "disabled" && !user.deletedAt && Boolean(user.disabledAt)) ||
+        (statusFilter === "deleted" && Boolean(user.deletedAt));
+      return matchesQuery && matchesStatus;
+    });
+  }, [query, statusFilter, users]);
 
   function replaceUser(next: AdminUser) {
     setUsers((prev) => sortUsers(prev.map((user) => (user.id === next.id ? next : user))));
@@ -153,12 +163,14 @@ export default function AdminPage() {
       const result = await api<UserResponse>(`/admin/users/${editingUser.id}/profile`, {
         method: "PATCH",
         body: JSON.stringify({
-          displayName: editingDisplayName.trim() || null
+          displayName: editingDisplayName.trim() || null,
+          globalRole: editingGlobalRole
         })
       });
       replaceUser(result.user);
       setEditingUser(null);
       setEditingDisplayName("");
+      setEditingGlobalRole("user");
       setMessage("账号资料已更新。");
     } catch (e) {
       setError(toZhError(e));
@@ -207,6 +219,36 @@ export default function AdminPage() {
       setUsers((prev) => prev.filter((user) => user.id !== deletingUser.id));
       setDeletingUser(null);
       setMessage("账号已删除。");
+    } catch (e) {
+      setError(toZhError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setUserDisabled(user: AdminUser, disabled: boolean) {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await api<UserResponse>(`/admin/users/${user.id}/${disabled ? "disable" : "enable"}`, { method: "POST", body: "{}" });
+      replaceUser(result.user);
+      setMessage(disabled ? "账号已停用。" : "账号已启用。");
+    } catch (e) {
+      setError(toZhError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function restoreUser(user: AdminUser) {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await api<UserResponse>(`/admin/users/${user.id}/restore`, { method: "POST", body: "{}" });
+      replaceUser(result.user);
+      setMessage("账号已恢复。");
     } catch (e) {
       setError(toZhError(e));
     } finally {
@@ -264,9 +306,21 @@ export default function AdminPage() {
               <h2 className="mr-page__section-title">账号列表</h2>
               <p className="mr-page__note">管理员不能删除自己；自己的密码也请到“用户设置”中修改。</p>
 
+              <div className="mr-page__actions" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                <input className="mr-input" value={query} placeholder="搜索用户名或昵称" onChange={(event) => setQuery(event.target.value)} />
+                <select className="mr-input" style={{ maxWidth: 150 }} value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
+                  <option value="active">正常账号</option>
+                  <option value="disabled">已停用</option>
+                  <option value="deleted">已删除</option>
+                  <option value="all">全部</option>
+                </select>
+              </div>
+
               <div className="mr-page__admin-user-list">
                 {sortedUsers.map((user) => {
                   const isSelf = viewer?.id === user.id;
+                  const isDeleted = Boolean(user.deletedAt);
+                  const isDisabled = Boolean(user.disabledAt);
                   return (
                     <div key={user.id} className="mr-page__user-row">
                       <div>
@@ -274,18 +328,21 @@ export default function AdminPage() {
                         <div className="mr-page__user-meta">
                           <span>@{user.username}</span>
                           <span>{user.globalRole === "admin" ? "管理员" : "普通用户"}</span>
+                          <span>{userStatusLabel(user)}</span>
                           <span>创建于 {formatDate(user.createdAt)}</span>
                           <span>最近更新 {formatDate(user.updatedAt)}</span>
+                          <span>最近登录 {user.lastLoginAt ? formatDate(user.lastLoginAt) : "从未"}</span>
                         </div>
                       </div>
                       <div className="mr-page__actions">
                         <button
                           className="mr-btn"
                           type="button"
-                          disabled={busy}
+                          disabled={busy || isDeleted}
                           onClick={() => {
                             setEditingUser(user);
                             setEditingDisplayName(user.displayName ?? "");
+                            setEditingGlobalRole(user.globalRole);
                           }}
                         >
                           编辑
@@ -293,7 +350,7 @@ export default function AdminPage() {
                         <button
                           className="mr-btn"
                           type="button"
-                          disabled={busy || isSelf}
+                          disabled={busy || isSelf || isDeleted}
                           onClick={() => {
                             setResettingUser(user);
                             setResetPassword("");
@@ -302,41 +359,80 @@ export default function AdminPage() {
                         >
                           重置密码
                         </button>
-                        <button
-                          className="mr-btn mr-btn--danger"
-                          type="button"
-                          disabled={busy || isSelf}
-                          onClick={() => setDeletingUser(user)}
-                        >
-                          删除
-                        </button>
+                        {isDeleted ? (
+                          <button className="mr-btn" type="button" disabled={busy} onClick={() => void restoreUser(user)}>
+                            恢复
+                          </button>
+                        ) : (
+                          <button className="mr-btn" type="button" disabled={busy || isSelf} onClick={() => void setUserDisabled(user, !isDisabled)}>
+                            {isDisabled ? "启用" : "停用"}
+                          </button>
+                        )}
+                        {!isDeleted ? (
+                          <button
+                            className="mr-btn mr-btn--danger"
+                            type="button"
+                            disabled={busy || isSelf}
+                            onClick={() => setDeletingUser(user)}
+                          >
+                            删除
+                          </button>
+                        ) : null}
                       </div>
                     </div>
                   );
                 })}
+                {sortedUsers.length === 0 ? <div className="mr-page__note">没有匹配的账号。</div> : null}
               </div>
             </section>
           </div>
         ) : null}
       </div>
 
-      <NameDialog
+      <Dialog
         open={Boolean(editingUser)}
         title="编辑账号资料"
-        description={editingUser ? `这里只调整 @${editingUser.username} 的显示昵称；用户名和身份不在这里修改。` : undefined}
-        label="昵称"
-        placeholder="留空则显示用户名"
-        value={editingDisplayName}
-        submitLabel="保存修改"
-        busy={busy}
-        onChange={setEditingDisplayName}
-        onSubmit={() => void saveEditedUser()}
+        description={editingUser ? `调整 @${editingUser.username} 的显示昵称和全局身份。` : undefined}
         onClose={() => {
           if (busy) return;
           setEditingUser(null);
           setEditingDisplayName("");
+          setEditingGlobalRole("user");
         }}
-      />
+        footer={
+          <>
+            <button
+              type="button"
+              className="mr-btn mr-btn--ghost"
+              disabled={busy}
+              onClick={() => {
+                setEditingUser(null);
+                setEditingDisplayName("");
+                setEditingGlobalRole("user");
+              }}
+            >
+              取消
+            </button>
+            <button type="button" className="mr-btn mr-btn--primary" disabled={busy} onClick={() => void saveEditedUser()}>
+              {busy ? "保存中…" : "保存修改"}
+            </button>
+          </>
+        }
+      >
+        <div className="mr-dialog__stack">
+          <label className="mr-field">
+            <span className="mr-field__label">昵称</span>
+            <input autoFocus className="mr-input" value={editingDisplayName} placeholder="留空则显示用户名" onChange={(event) => setEditingDisplayName(event.target.value)} />
+          </label>
+          <label className="mr-field">
+            <span className="mr-field__label">身份</span>
+            <select className="mr-input" value={editingGlobalRole} onChange={(event) => setEditingGlobalRole(event.target.value as AdminUser["globalRole"])}>
+              <option value="user">普通用户</option>
+              <option value="admin">管理员</option>
+            </select>
+          </label>
+        </div>
+      </Dialog>
 
       <Dialog
         open={Boolean(resettingUser)}

@@ -9,6 +9,7 @@ import { Dialog, NameDialog } from "./_components/dialog";
 import { formatBytes, formatDuration } from "./_components/workspaceMock";
 import { IconChevron, IconFolder, IconSearch, IconSort, IconVideo } from "./_components/icons";
 import { useUiPreferences } from "./_components/theme";
+import { api } from "./_components/api";
 
 type ApiUser = {
   id: string;
@@ -76,6 +77,70 @@ type MediaStatusResponse = {
     status: string;
   };
 };
+
+type ProjectMemberRole = "owner" | "editor" | "commenter" | "viewer";
+
+type ProjectMember = {
+  userId: string;
+  username: string;
+  displayName: string | null;
+  avatarPreset?: string | null;
+  role: ProjectMemberRole;
+  createdAt: string;
+};
+
+type ProjectMembersResponse = { members: ProjectMember[] };
+type ProjectMemberResponse = { member: ProjectMember };
+
+const PROJECT_MEMBER_ROLE_OPTIONS: Array<{ value: Exclude<ProjectMemberRole, "owner">; label: string; description: string }> = [
+  { value: "editor", label: "编辑者", description: "可上传、整理素材并参与标注。" },
+  { value: "commenter", label: "评论者", description: "可查看、评论和画面标注。" },
+  { value: "viewer", label: "只读者", description: "只能查看项目内容。" }
+];
+
+function roleLabel(role?: ProjectMemberRole) {
+  const labels: Record<ProjectMemberRole, string> = {
+    owner: "拥有者",
+    editor: "编辑者",
+    commenter: "评论者",
+    viewer: "只读者"
+  };
+  return role ? labels[role] : "成员";
+}
+
+function canProject(project: Project | null | undefined, capability: string) {
+  return !!project?.capabilities?.includes(capability);
+}
+
+type SharePermission = "view" | "comment" | "annotate";
+type ShareAudience = "anyone" | "authenticated";
+
+type ProjectShareLink = {
+  id: string;
+  label: string | null;
+  audience: ShareAudience;
+  projectId: string | null;
+  mediaId: string | null;
+  permissions: SharePermission[];
+  hasPassword: boolean;
+  maxUses: number | null;
+  useCount: number;
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+  token?: string;
+  url?: string;
+};
+
+type ShareLinksResponse = { shareLinks: ProjectShareLink[] };
+type ShareLinkResponse = { shareLink: ProjectShareLink };
+
+const SHARE_PERMISSION_OPTIONS: Array<{ value: SharePermission; label: string }> = [
+  { value: "view", label: "查看" },
+  { value: "comment", label: "评论" },
+  { value: "annotate", label: "标注" }
+];
 
 type UploadMode = "original" | "compress";
 type UploadResolution = "1080p" | "720p";
@@ -208,22 +273,6 @@ type ContextMenuState = {
     | { kind: "project"; id: string; name: string; ownerId: string };
 };
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-  if (init?.body != null && !headers.has("content-type")) {
-    headers.set("content-type", "application/json");
-  }
-
-  const res = await fetch(`/api${path}`, {
-    ...init,
-    headers,
-    credentials: "include"
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error("api_error"), { status: res.status, data });
-  return data as T;
-}
-
 function uploadToPresignedUrl(url: string, file: File, onProgress?: (progress: number) => void) {
   return new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -260,6 +309,8 @@ function toZhError(e: any): string {
     username_taken: "这个用户名已被占用",
     invalid_credentials: "用户名或密码不正确",
     unauthorized: "未登录或登录已过期",
+    public_registration_disabled: "当前实例已关闭公开注册，请联系管理员创建账号",
+    account_disabled: "这个账号已被管理员停用",
     database_unavailable: "数据库不可用，请先启动 API 的 SQLite/Prisma 链路",
     internal_server_error: "服务器内部错误（请查看 API 控制台日志）",
     processing_failed: "视频处理失败，请检查 worker、ffmpeg 和对象存储日志",
@@ -434,6 +485,19 @@ export default function AppClient() {
   const [projectOrder, setProjectOrder] = useState<string[]>([]);
   const [dragProjectId, setDragProjectId] = useState<string | null>(null);
   const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
+  const [collaborationOpen, setCollaborationOpen] = useState(false);
+  const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
+  const [memberUsername, setMemberUsername] = useState("");
+  const [memberRole, setMemberRole] = useState<Exclude<ProjectMemberRole, "owner">>("commenter");
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [collaborationTab, setCollaborationTab] = useState<"members" | "links">("members");
+  const [shareLinks, setShareLinks] = useState<ProjectShareLink[]>([]);
+  const [shareLinksLoading, setShareLinksLoading] = useState(false);
+  const [shareLabel, setShareLabel] = useState("");
+  const [shareAudience, setShareAudience] = useState<ShareAudience>("anyone");
+  const [sharePassword, setSharePassword] = useState("");
+  const [shareExpiresAt, setShareExpiresAt] = useState("");
+  const [sharePermissions, setSharePermissions] = useState<SharePermission[]>(["view", "comment", "annotate"]);
 
   const canSubmit = useMemo(() => {
     if (mode === "login") {
@@ -610,6 +674,176 @@ export default function AppClient() {
       window.removeEventListener("resize", closeMenu);
     };
   }, [contextMenu, sortMenuOpen]);
+
+  function getCurrentProject() {
+    return workspaces.find((project) => project.id === effectivePid) ?? workspace?.project ?? null;
+  }
+
+  async function loadProjectMembers(projectId: string) {
+    setMembersLoading(true);
+    try {
+      const result = await api<ProjectMembersResponse>(`/projects/${projectId}/members`);
+      setProjectMembers(result.members);
+    } catch (e: any) {
+      showFeedback("error", toZhError(e));
+    } finally {
+      setMembersLoading(false);
+    }
+  }
+
+  function openCollaborationDialog(project: Project | null) {
+    if (!project) return;
+    setCollaborationOpen(true);
+    setCollaborationTab("members");
+    setMemberUsername("");
+    setMemberRole("commenter");
+    resetShareDraft();
+    void loadProjectMembers(project.id);
+    void loadProjectShareLinks(project.id);
+  }
+
+  async function addProjectMember() {
+    const project = getCurrentProject();
+    if (!project || !memberUsername.trim()) return;
+    setBusy(true);
+    try {
+      const result = await api<ProjectMemberResponse>(`/projects/${project.id}/members`, {
+        method: "POST",
+        body: JSON.stringify({ username: memberUsername.trim(), role: memberRole })
+      });
+      setProjectMembers((members) => [result.member, ...members.filter((member) => member.userId !== result.member.userId)]);
+      setMemberUsername("");
+      showFeedback("success", "协作成员已更新");
+    } catch (e: any) {
+      showFeedback("error", toZhError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateProjectMemberRole(member: ProjectMember, role: Exclude<ProjectMemberRole, "owner">) {
+    const project = getCurrentProject();
+    if (!project || member.role === "owner") return;
+    setBusy(true);
+    try {
+      const result = await api<ProjectMemberResponse>(`/projects/${project.id}/members/${member.userId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ role })
+      });
+      setProjectMembers((members) => members.map((item) => (item.userId === member.userId ? result.member : item)));
+      showFeedback("success", "成员权限已更新");
+    } catch (e: any) {
+      showFeedback("error", toZhError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeProjectMember(member: ProjectMember) {
+    const project = getCurrentProject();
+    if (!project || member.role === "owner") return;
+    setBusy(true);
+    try {
+      await api<{ ok: true }>(`/projects/${project.id}/members/${member.userId}`, { method: "DELETE" });
+      setProjectMembers((members) => members.filter((item) => item.userId !== member.userId));
+      showFeedback("success", "成员已移除");
+    } catch (e: any) {
+      showFeedback("error", toZhError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadProjectShareLinks(projectId: string) {
+    setShareLinksLoading(true);
+    try {
+      const result = await api<ShareLinksResponse>(`/projects/${projectId}/share-links`);
+      setShareLinks(result.shareLinks);
+    } catch (e: any) {
+      showFeedback("error", toZhError(e));
+    } finally {
+      setShareLinksLoading(false);
+    }
+  }
+
+  function resetShareDraft() {
+    setShareLabel("");
+    setShareAudience("anyone");
+    setSharePassword("");
+    setShareExpiresAt("");
+    setSharePermissions(["view", "comment", "annotate"]);
+  }
+
+  function toggleSharePermission(permission: SharePermission) {
+    setSharePermissions((current) => {
+      if (current.includes(permission)) {
+        const next = current.filter((item) => item !== permission);
+        return next.length > 0 ? next : current;
+      }
+      return [...current, permission];
+    });
+  }
+
+  function buildShareUrl(link: ProjectShareLink) {
+    if (!link.url) return null;
+    return new URL(link.url, window.location.origin).toString();
+  }
+
+  async function copyShareLink(link: ProjectShareLink) {
+    const url = buildShareUrl(link);
+    if (!url) {
+      showFeedback("error", "这个链接的原始地址只会在创建时显示，请重新创建一个链接。");
+      return;
+    }
+    await navigator.clipboard.writeText(url);
+    showFeedback("success", "分享链接已复制");
+  }
+
+  async function createShareLink() {
+    const project = getCurrentProject();
+    if (!project) return;
+    setBusy(true);
+    try {
+      const expiresAt = shareExpiresAt ? new Date(shareExpiresAt).toISOString() : null;
+      const result = await api<ShareLinkResponse>(`/projects/${project.id}/share-links`, {
+        method: "POST",
+        body: JSON.stringify({
+          label: shareLabel.trim() || null,
+          audience: shareAudience,
+          password: sharePassword || null,
+          expiresAt,
+          permissions: sharePermissions
+        })
+      });
+      setShareLinks((links) => [result.shareLink, ...links]);
+      resetShareDraft();
+      const url = buildShareUrl(result.shareLink);
+      if (url) await navigator.clipboard.writeText(url);
+      showFeedback("success", url ? "分享链接已创建并复制" : "分享链接已创建");
+    } catch (e: any) {
+      showFeedback("error", toZhError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeShareLink(link: ProjectShareLink) {
+    const project = getCurrentProject();
+    if (!project) return;
+    setBusy(true);
+    try {
+      const result = await api<ShareLinkResponse>(`/projects/${project.id}/share-links/${link.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ revoked: true })
+      });
+      setShareLinks((links) => links.map((item) => (item.id === link.id ? result.shareLink : item)));
+      showFeedback("success", "分享链接已撤销");
+    } catch (e: any) {
+      showFeedback("error", toZhError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   function toggleSelected(id: string) {
     const next = new Set(selectedIds);
@@ -1417,10 +1651,12 @@ export default function AppClient() {
   const currentFolderName = crumbs.at(-1)?.name ?? "根目录";
   const parentFolderId = crumbs.length > 1 ? crumbs[crumbs.length - 2]?.id ?? rootFid : rootFid;
   const canGoUpFolder = scope === "workspace" && effectivePid != null && effectiveFid != null && effectiveFid !== rootFid;
-  const renameState = getRenameTarget();
-  const renameDisabled = !workspace || !selectionMode || "error" in renameState;
-  const renameHint = renameDisabled ? ("error" in renameState ? renameState.error : "请先进入多选模式") : "重命名当前选中条目";
   const currentProject = workspaces.find((project) => project.id === effectivePid) ?? workspace?.project ?? null;
+  const canEditAssets = canProject(currentProject, "project:edit_assets");
+  const canDeleteProject = canProject(currentProject, "project:delete");
+  const renameState = getRenameTarget();
+  const renameDisabled = !workspace || !selectionMode || !canEditAssets || "error" in renameState;
+  const renameHint = renameDisabled ? (!canEditAssets ? "当前权限不能修改素材" : "error" in renameState ? renameState.error : "请先进入多选模式") : "重命名当前选中条目";
   const projectOwnerLabel = currentProject?.ownerId === user?.id
     ? (user?.displayName?.trim() || user?.username || "未知")
     : currentProject?.ownerId ?? "未知";
@@ -1569,6 +1805,158 @@ export default function AppClient() {
           <div className="mr-dialog__note mr-dialog__note--danger">
             该操作会永久移除回收站中的所有视频，仅建议在确认不再需要恢复时执行。
           </div>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={collaborationOpen}
+        title="项目协作"
+        description={currentProject ? `管理“${currentProject.name}”的直接协作成员。` : undefined}
+        onClose={() => {
+          if (busy) return;
+          setCollaborationOpen(false);
+        }}
+        footer={
+          <button type="button" className="mr-btn mr-btn--primary" disabled={busy} onClick={() => setCollaborationOpen(false)}>
+            完成
+          </button>
+        }
+      >
+        <div className="mr-dialog__stack">
+          <div className="mr-avatar-dialog__tabs" role="tablist" aria-label="协作设置">
+            <button type="button" className={`mr-avatar-dialog__tab${collaborationTab === "members" ? " is-active" : ""}`} onClick={() => setCollaborationTab("members")}>
+              成员
+            </button>
+            <button type="button" className={`mr-avatar-dialog__tab${collaborationTab === "links" ? " is-active" : ""}`} onClick={() => setCollaborationTab("links")}>
+              分享链接
+            </button>
+          </div>
+
+          {collaborationTab === "members" ? (
+            <>
+              <div className="mr-page__user-row mr-collab-row">
+                <label className="mr-field" style={{ margin: 0 }}>
+                  <span className="mr-field__label">用户名</span>
+                  <input className="mr-input" value={memberUsername} placeholder="输入现有用户名" onChange={(event) => setMemberUsername(event.target.value)} />
+                </label>
+                <label className="mr-field" style={{ margin: 0 }}>
+                  <span className="mr-field__label">权限</span>
+                  <select className="mr-input" value={memberRole} onChange={(event) => setMemberRole(event.target.value as Exclude<ProjectMemberRole, "owner">)}>
+                    {PROJECT_MEMBER_ROLE_OPTIONS.map((role) => (
+                      <option key={role.value} value={role.value}>{role.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <button className="mr-btn mr-btn--primary" type="button" disabled={busy || !memberUsername.trim()} onClick={() => void addProjectMember()}>
+                  添加成员
+                </button>
+              </div>
+
+              <div className="mr-dialog__note">
+                编辑者可上传和整理素材；评论者可查看、评论和标注；只读者只能查看。
+              </div>
+
+              <div className="mr-page__stack">
+                {membersLoading ? <div className="mr-page__note">正在加载成员…</div> : null}
+                {!membersLoading && projectMembers.length === 0 ? <div className="mr-page__note">暂无协作成员。</div> : null}
+                {projectMembers.map((member) => (
+                  <div key={member.userId} className="mr-page__user-row">
+                    <div>
+                      <strong>{member.displayName?.trim() || member.username}</strong>
+                      <div className="mr-page__user-meta">@{member.username} · {roleLabel(member.role)}</div>
+                    </div>
+                    {member.role === "owner" ? (
+                      <span className="mr-badge">拥有者</span>
+                    ) : (
+                      <div className="mr-page__actions" style={{ justifyContent: "flex-end" }}>
+                        <select className="mr-input" value={member.role} disabled={busy} onChange={(event) => void updateProjectMemberRole(member, event.target.value as Exclude<ProjectMemberRole, "owner">)}>
+                          {PROJECT_MEMBER_ROLE_OPTIONS.map((role) => (
+                            <option key={role.value} value={role.value}>{role.label}</option>
+                          ))}
+                        </select>
+                        <button className="mr-btn mr-btn--danger" type="button" disabled={busy} onClick={() => void removeProjectMember(member)}>
+                          移除
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="mr-page__user-row mr-collab-row">
+                <label className="mr-field" style={{ margin: 0 }}>
+                  <span className="mr-field__label">链接名称</span>
+                  <input className="mr-input" value={shareLabel} placeholder="例如：客户评审" onChange={(event) => setShareLabel(event.target.value)} />
+                </label>
+                <label className="mr-field" style={{ margin: 0 }}>
+                  <span className="mr-field__label">访问范围</span>
+                  <select className="mr-input" value={shareAudience} onChange={(event) => setShareAudience(event.target.value as ShareAudience)}>
+                    <option value="anyone">任何人</option>
+                    <option value="authenticated">仅登录用户</option>
+                  </select>
+                </label>
+                <button className="mr-btn mr-btn--primary" type="button" disabled={busy || sharePermissions.length === 0} onClick={() => void createShareLink()}>
+                  创建并复制
+                </button>
+              </div>
+
+              <div className="mr-page__user-row mr-collab-row">
+                <label className="mr-field" style={{ margin: 0 }}>
+                  <span className="mr-field__label">密码（可选）</span>
+                  <input className="mr-input" value={sharePassword} placeholder="不填则无密码" onChange={(event) => setSharePassword(event.target.value)} />
+                </label>
+                <label className="mr-field" style={{ margin: 0 }}>
+                  <span className="mr-field__label">过期时间（可选）</span>
+                  <input className="mr-input" type="datetime-local" value={shareExpiresAt} onChange={(event) => setShareExpiresAt(event.target.value)} />
+                </label>
+                <div className="mr-page__actions" style={{ alignSelf: "end" }}>
+                  {SHARE_PERMISSION_OPTIONS.map((permission) => (
+                    <button
+                      key={permission.value}
+                      type="button"
+                      className={`mr-btn${sharePermissions.includes(permission.value) ? " mr-btn--primary" : ""}`}
+                      onClick={() => toggleSharePermission(permission.value)}
+                    >
+                      {permission.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mr-dialog__note">
+                新链接的完整地址只在创建时返回；创建后会自动复制到剪贴板。
+              </div>
+
+              <div className="mr-page__stack">
+                {shareLinksLoading ? <div className="mr-page__note">正在加载分享链接…</div> : null}
+                {!shareLinksLoading && shareLinks.length === 0 ? <div className="mr-page__note">暂无分享链接。</div> : null}
+                {shareLinks.map((link) => (
+                  <div key={link.id} className="mr-page__user-row">
+                    <div>
+                      <strong>{link.label || "未命名链接"}</strong>
+                      <div className="mr-page__user-meta">
+                        {link.audience === "anyone" ? "任何人" : "仅登录用户"} · {link.permissions.map((permission) => SHARE_PERMISSION_OPTIONS.find((item) => item.value === permission)?.label ?? permission).join("、")}
+                        {link.hasPassword ? " · 有密码" : ""}
+                        {link.revokedAt ? " · 已撤销" : ""}
+                      </div>
+                    </div>
+                    <div className="mr-page__actions" style={{ justifyContent: "flex-end" }}>
+                      {link.url ? (
+                        <button className="mr-btn" type="button" disabled={busy} onClick={() => void copyShareLink(link)}>
+                          复制
+                        </button>
+                      ) : null}
+                      <button className="mr-btn mr-btn--danger" type="button" disabled={busy || !!link.revokedAt} onClick={() => void revokeShareLink(link)}>
+                        撤销
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       </Dialog>
 
@@ -1972,17 +2360,17 @@ export default function AppClient() {
                           className="mr-btn mr-btn--danger"
                           type="button"
                           onClick={() => currentProject && openClearTrashDialog(currentProject.id, currentProject.name)}
-                          disabled={trashItems.length === 0 || busy}
+                          disabled={trashItems.length === 0 || busy || !canEditAssets}
                         >
                           全部删除
                         </button>
                       </>
                     ) : (
                       <>
-                        <button className="mr-btn mr-btn--primary" type="button" onClick={() => openUploadDialog()}>
+                        <button className="mr-btn mr-btn--primary" type="button" onClick={() => openUploadDialog()} disabled={!canEditAssets}>
                           上传视频
                         </button>
-                        <button className="mr-btn" type="button" onClick={() => openCreateFolderDialog()}>
+                        <button className="mr-btn" type="button" onClick={() => openCreateFolderDialog()} disabled={!canEditAssets}>
                           新建文件夹
                         </button>
                         <button className="mr-btn" type="button" onClick={() => setQuery({ scope: "trash", sel: null, q: null })}>
@@ -2007,7 +2395,7 @@ export default function AppClient() {
                         <button className="mr-btn" type="button" onClick={() => openRenameDialog()} disabled={renameDisabled} title={renameHint}>
                           重命名
                         </button>
-                        <button className="mr-btn mr-btn--danger" type="button" onClick={() => void onDeleteSelected()} disabled={!selectionMode || selectedIds.size === 0}>
+                        <button className="mr-btn mr-btn--danger" type="button" onClick={() => void onDeleteSelected()} disabled={!selectionMode || selectedIds.size === 0 || !canEditAssets}>
                           删除
                         </button>
                       </>
@@ -2277,10 +2665,10 @@ export default function AppClient() {
                         <button className="mr-btn" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("open")}>
                           打开文件夹
                         </button>
-                        <button className="mr-btn" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("rename")}>
+                        <button className="mr-btn" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("rename")} disabled={!canEditAssets}>
                           重命名
                         </button>
-                        <button className="mr-btn mr-btn--danger" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("delete")}>
+                        <button className="mr-btn mr-btn--danger" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("delete")} disabled={!canEditAssets}>
                           删除
                         </button>
                       </>
@@ -2303,10 +2691,10 @@ export default function AppClient() {
                             下载
                           </button>
                         ) : null}
-                        <button className="mr-btn" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("rename")}>
+                        <button className="mr-btn" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("rename")} disabled={!canEditAssets}>
                           重命名
                         </button>
-                        <button className="mr-btn mr-btn--danger" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("delete")}>
+                        <button className="mr-btn mr-btn--danger" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("delete")} disabled={!canEditAssets}>
                           删除
                         </button>
                       </>
@@ -2363,9 +2751,14 @@ export default function AppClient() {
                         <strong>{formatBytes(projectViewSizeBytes)}</strong>
                       </div>
                       <div className="mr-project-meta">
-                        <span>回收站条目</span>
-                        <strong>{trashItems.length}</strong>
+                        <span>我的权限</span>
+                        <strong>{roleLabel(currentProject.role)}</strong>
                       </div>
+                      {canProject(currentProject, "project:manage_members") ? (
+                        <button className="mr-btn mr-btn--primary" type="button" onClick={() => openCollaborationDialog(currentProject)}>
+                          协作成员
+                        </button>
+                      ) : null}
                     </div>
                   ) : (
                     <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 13, lineHeight: 1.6 }}>选择一个项目后，这里会显示项目级信息。</div>

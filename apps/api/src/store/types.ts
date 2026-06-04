@@ -1,4 +1,5 @@
 export type UserGlobalRole = "admin" | "user";
+export type StoreProjectRole = "owner" | "editor" | "commenter" | "viewer";
 
 export type StoreUser = {
   id: string;
@@ -10,6 +11,8 @@ export type StoreUser = {
   avatarPreset: string | null;
   globalRole: UserGlobalRole;
   sessionVersion: number;
+  lastLoginAt: Date | null;
+  disabledAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
   deletedAt: Date | null;
@@ -23,8 +26,11 @@ export type StoreUserProfile = {
   avatarContentType: string | null;
   avatarPreset: string | null;
   globalRole: UserGlobalRole;
+  lastLoginAt: Date | null;
+  disabledAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  deletedAt: Date | null;
 };
 
 export type StoreProject = {
@@ -33,6 +39,9 @@ export type StoreProject = {
   ownerId: string;
   createdAt: Date;
   updatedAt: Date;
+  role?: StoreProjectRole;
+  accessSource?: "owner" | "member";
+  capabilities?: string[];
 };
 
 export type Store = {
@@ -63,7 +72,8 @@ export type Store = {
     passwordHash: string;
     nextSessionVersion: number;
   }): Promise<StoreUser | null>;
-  userList(): Promise<StoreUserProfile[]>;
+  userRecordLogin(args: { userId: string }): Promise<StoreUser | null>;
+  userList(args?: { includeDeleted?: boolean }): Promise<StoreUserProfile[]>;
   userCreateByAdmin(args: {
     username: string;
     passwordHash: string;
@@ -73,6 +83,7 @@ export type Store = {
   adminUpdateUserProfile(args: {
     userId: string;
     displayName: string | null;
+    globalRole?: UserGlobalRole;
   }): Promise<StoreUser | null>;
   adminResetUserPassword(args: {
     userId: string;
@@ -80,6 +91,8 @@ export type Store = {
     nextSessionVersion: number;
   }): Promise<StoreUser | null>;
   userSoftDelete(args: { userId: string }): Promise<StoreUser | null>;
+  adminSetUserDisabled(args: { userId: string; disabled: boolean }): Promise<StoreUser | null>;
+  adminRestoreUser(args: { userId: string }): Promise<StoreUser | null>;
 
   projectListForUser(userId: string): Promise<StoreProject[]>;
   projectCreate(args: { userId: string; name: string }): Promise<StoreProject>;

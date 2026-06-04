@@ -5,6 +5,7 @@ import { prisma } from "../db";
 import { auditLog } from "../audit";
 import { env } from "../env";
 import { getUserId, requireUser } from "../auth/requireUser";
+import { getAnnotationProjectAccess, getMediaProjectAccess, hasCapability } from "../access";
 import { presignGetObject } from "../s3";
 
 const RectSchema = z.object({
@@ -128,36 +129,15 @@ function getAnnotationWhere(mediaId: string, status: "all" | "completed" | "inco
 }
 
 async function assertMediaAccess(userId: string, mediaId: string) {
-  const media = await prisma.media.findFirst({
-    where: {
-      id: mediaId,
-      deletedAt: null,
-      project: {
-        deletedAt: null,
-        OR: [{ ownerId: userId }, { members: { some: { userId } } }]
-      }
-    },
-    select: { id: true, projectId: true }
-  });
-  return media;
+  const result = await getMediaProjectAccess({ userId, mediaId });
+  if (!result || !hasCapability(result.access, "project:view")) return null;
+  return { id: result.media.id, projectId: result.media.projectId, projectAccess: result.access };
 }
 
 async function assertAnnotationAccess(userId: string, annotationId: string) {
-  const annotation = await prisma.annotation.findFirst({
-    where: {
-      id: annotationId,
-      deletedAt: null,
-      media: {
-        deletedAt: null,
-        project: {
-          deletedAt: null,
-          OR: [{ ownerId: userId }, { members: { some: { userId } } }]
-        }
-      }
-    },
-    select: { id: true, mediaId: true, projectId: true, parentId: true }
-  });
-  return annotation;
+  const result = await getAnnotationProjectAccess({ userId, annotationId });
+  if (!result || !hasCapability(result.access, "project:view")) return null;
+  return { ...result.annotation, projectAccess: result.access };
 }
 
 async function hydrateAnnotationAvatarUrls<T extends Array<any>>(annotations: T): Promise<T> {
@@ -234,6 +214,9 @@ export async function annotationRoutes(app: FastifyInstance) {
     if (!access) return reply.code(404).send({ error: "not_found" });
 
     const input = CreateAnnotationSchema.parse(req.body);
+    if (!hasCapability(access.projectAccess, input.parentId ? "project:comment" : "project:annotate")) {
+      return reply.code(403).send({ error: "forbidden" });
+    }
     if (input.parentId) {
       const parent = await prisma.annotation.findFirst({
         where: { id: input.parentId, mediaId, deletedAt: null },
@@ -283,6 +266,7 @@ export async function annotationRoutes(app: FastifyInstance) {
     const annotationId = (req.params as any).annotationId as string;
     const access = await assertAnnotationAccess(userId, annotationId);
     if (!access) return reply.code(404).send({ error: "not_found" });
+    if (access.authorId !== userId && !hasCapability(access.projectAccess, "project:edit_assets")) return reply.code(403).send({ error: "forbidden" });
 
     const input = UpdateAnnotationSchema.parse(req.body);
     const annotation = await prisma.annotation.update({
@@ -326,6 +310,7 @@ export async function annotationRoutes(app: FastifyInstance) {
     const annotationId = (req.params as any).annotationId as string;
     const access = await assertAnnotationAccess(userId, annotationId);
     if (!access) return reply.code(404).send({ error: "not_found" });
+    if (!hasCapability(access.projectAccess, "project:comment")) return reply.code(403).send({ error: "forbidden" });
 
     const input = CompletionSchema.parse(req.body);
     const annotation = await prisma.annotation.update({
@@ -353,6 +338,7 @@ export async function annotationRoutes(app: FastifyInstance) {
     const annotationId = (req.params as any).annotationId as string;
     const access = await assertAnnotationAccess(userId, annotationId);
     if (!access) return reply.code(404).send({ error: "not_found" });
+    if (access.authorId !== userId && !hasCapability(access.projectAccess, "project:edit_assets")) return reply.code(403).send({ error: "forbidden" });
 
     await prisma.$transaction(async (tx) => {
       await tx.annotation.updateMany({

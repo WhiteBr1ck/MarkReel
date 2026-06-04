@@ -9,7 +9,6 @@ import {
 } from "@aws-sdk/client-s3";
 import type { S3ServiceException } from "@aws-sdk/client-s3";
 import { Readable } from "node:stream";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { env } from "./env";
 
 export const s3 = new S3Client({
@@ -66,15 +65,25 @@ export async function presignPutObject(args: {
   contentType?: string;
   expiresInSeconds?: number;
 }) {
-  const cmd = new PutObjectCommand({
-    Bucket: args.bucket,
-    Key: args.objectKey,
-    ContentType: args.contentType
-  });
-  const url = await getSignedUrl(s3, cmd, {
-    expiresIn: args.expiresInSeconds ?? 900
-  });
-  return url;
+  return `/api/objects/${encodeURIComponent(args.bucket)}/${encodeURIComponent(args.objectKey)}`;
+}
+
+export async function putObjectStream(args: {
+  bucket: string;
+  objectKey: string;
+  body: Readable;
+  contentType?: string;
+  contentLength?: number;
+}) {
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: args.bucket,
+      Key: args.objectKey,
+      Body: args.body,
+      ContentType: args.contentType,
+      ContentLength: args.contentLength
+    })
+  );
 }
 
 export async function statObject(args: {
@@ -123,13 +132,6 @@ export async function presignGetObject(args: {
   objectKey: string;
   expiresInSeconds?: number;
 }) {
-  const cmd = new GetObjectCommand({
-    Bucket: args.bucket,
-    Key: args.objectKey
-  });
-  const url = await getSignedUrl(s3, cmd, {
-    expiresIn: args.expiresInSeconds ?? 900
-  });
-  return url;
+  return `/api/objects/${encodeURIComponent(args.bucket)}/${encodeURIComponent(args.objectKey)}`;
 }
 
