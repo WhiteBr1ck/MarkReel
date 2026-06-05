@@ -5,7 +5,7 @@ import { prisma } from "../db";
 import { auditLog } from "../audit";
 import { env } from "../env";
 import { getUserId, requireUser } from "../auth/requireUser";
-import { getAnnotationProjectAccess, getMediaProjectAccess, hasCapability } from "../access";
+import { getAnnotationAccess, getMediaAccess, hasMediaCapability, hasCapability } from "../access";
 import { presignGetObject } from "../s3";
 
 const RectSchema = z.object({
@@ -129,15 +129,15 @@ function getAnnotationWhere(mediaId: string, status: "all" | "completed" | "inco
 }
 
 async function assertMediaAccess(userId: string, mediaId: string) {
-  const result = await getMediaProjectAccess({ userId, mediaId });
-  if (!result || !hasCapability(result.access, "project:view")) return null;
-  return { id: result.media.id, projectId: result.media.projectId, projectAccess: result.access };
+  const result = await getMediaAccess({ userId, mediaId });
+  if (!result || !hasMediaCapability(result.access, "media:view")) return null;
+  return { id: result.media.id, projectId: result.media.projectId, mediaAccess: result.access, projectAccess: result.access.projectAccess };
 }
 
 async function assertAnnotationAccess(userId: string, annotationId: string) {
-  const result = await getAnnotationProjectAccess({ userId, annotationId });
-  if (!result || !hasCapability(result.access, "project:view")) return null;
-  return { ...result.annotation, projectAccess: result.access };
+  const result = await getAnnotationAccess({ userId, annotationId });
+  if (!result || !hasMediaCapability(result.mediaAccess, "media:view")) return null;
+  return { ...result.annotation, mediaAccess: result.mediaAccess, projectAccess: result.projectAccess };
 }
 
 async function hydrateAnnotationAvatarUrls<T extends Array<any>>(annotations: T): Promise<T> {
@@ -214,7 +214,7 @@ export async function annotationRoutes(app: FastifyInstance) {
     if (!access) return reply.code(404).send({ error: "not_found" });
 
     const input = CreateAnnotationSchema.parse(req.body);
-    if (!hasCapability(access.projectAccess, input.parentId ? "project:comment" : "project:annotate")) {
+    if (!hasMediaCapability(access.mediaAccess, "media:annotate")) {
       return reply.code(403).send({ error: "forbidden" });
     }
     if (input.parentId) {
@@ -266,7 +266,7 @@ export async function annotationRoutes(app: FastifyInstance) {
     const annotationId = (req.params as any).annotationId as string;
     const access = await assertAnnotationAccess(userId, annotationId);
     if (!access) return reply.code(404).send({ error: "not_found" });
-    if (access.authorId !== userId && !hasCapability(access.projectAccess, "project:edit_assets")) return reply.code(403).send({ error: "forbidden" });
+    if (access.authorId !== userId && !hasMediaCapability(access.mediaAccess, "media:manage")) return reply.code(403).send({ error: "forbidden" });
 
     const input = UpdateAnnotationSchema.parse(req.body);
     const annotation = await prisma.annotation.update({
@@ -310,7 +310,7 @@ export async function annotationRoutes(app: FastifyInstance) {
     const annotationId = (req.params as any).annotationId as string;
     const access = await assertAnnotationAccess(userId, annotationId);
     if (!access) return reply.code(404).send({ error: "not_found" });
-    if (!hasCapability(access.projectAccess, "project:comment")) return reply.code(403).send({ error: "forbidden" });
+    if (access.authorId !== userId && !hasCapability(access.projectAccess, "project:manage_members")) return reply.code(403).send({ error: "forbidden" });
 
     const input = CompletionSchema.parse(req.body);
     const annotation = await prisma.annotation.update({
@@ -338,7 +338,7 @@ export async function annotationRoutes(app: FastifyInstance) {
     const annotationId = (req.params as any).annotationId as string;
     const access = await assertAnnotationAccess(userId, annotationId);
     if (!access) return reply.code(404).send({ error: "not_found" });
-    if (access.authorId !== userId && !hasCapability(access.projectAccess, "project:edit_assets")) return reply.code(403).send({ error: "forbidden" });
+    if (access.authorId !== userId && !hasMediaCapability(access.mediaAccess, "media:manage")) return reply.code(403).send({ error: "forbidden" });
 
     await prisma.$transaction(async (tx) => {
       await tx.annotation.updateMany({

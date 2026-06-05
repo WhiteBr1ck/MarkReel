@@ -37,10 +37,11 @@ export type StoreProject = {
   id: string;
   name: string;
   ownerId: string;
+  organizationId?: string | null;
   createdAt: Date;
   updatedAt: Date;
   role?: StoreProjectRole;
-  accessSource?: "owner" | "member";
+  accessSource?: "owner" | "project_grant" | "legacy_member";
   capabilities?: string[];
 };
 
@@ -95,7 +96,7 @@ export type Store = {
   adminRestoreUser(args: { userId: string }): Promise<StoreUser | null>;
 
   projectListForUser(userId: string): Promise<StoreProject[]>;
-  projectCreate(args: { userId: string; name: string }): Promise<StoreProject>;
+  projectCreate(args: { userId: string; name: string; organizationId?: string | null }): Promise<StoreProject>;
   projectGetForUser(args: { userId: string; projectId: string }): Promise<StoreProject | null>;
   projectRenameForUser(args: { userId: string; projectId: string; name: string }): Promise<StoreProject | null>;
   projectDeleteForUser(args: { userId: string; projectId: string }): Promise<StoreProject | null>;

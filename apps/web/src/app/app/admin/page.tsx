@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Dialog } from "../_components/dialog";
 import { api } from "../_components/api";
 
@@ -29,6 +30,19 @@ type MeResponse = {
 type UsersResponse = { users: AdminUser[] };
 type UserResponse = { user: AdminUser };
 
+type Organization = {
+  id: string;
+  name: string;
+  owner: { id: string; username: string; displayName: string | null; avatarPreset?: string | null } | null;
+  createdById: string;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+};
+
+type OrganizationsResponse = { organizations: Organization[] };
+type OrganizationResponse = { organization: Organization };
+
 function sanitizeWorkbenchHref(value: string | null): string {
   if (!value) return "/app";
   try {
@@ -49,6 +63,9 @@ function toZhError(e: any) {
     cannot_disable_self: "不能停用当前管理员账号。",
     cannot_demote_self: "不能把当前管理员降级为普通用户。",
     not_found: "目标用户不存在。",
+    user_not_found: "目标用户不存在。",
+    organization_has_projects: "该组织下还有项目，不能删除。",
+    owner_required: "请先指定负责人。",
     use_user_settings: "当前管理员自己的密码请到“用户设置”里修改。"
   };
   if (e?.status === 403) return "只有管理员可以访问这里。";
@@ -67,6 +84,10 @@ function sortUsers(users: AdminUser[]) {
   return [...users].sort((a, b) => a.username.localeCompare(b.username, "zh-CN"));
 }
 
+function sortOrganizations(organizations: Organization[]) {
+  return [...organizations].sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+}
+
 function userStatusLabel(user: AdminUser) {
   if (user.deletedAt) return "已删除";
   if (user.disabledAt) return "已停用";
@@ -74,12 +95,16 @@ function userStatusLabel(user: AdminUser) {
 }
 
 export default function AdminPage() {
+  const router = useRouter();
   const [backHref, setBackHref] = useState("/app");
   const [viewer, setViewer] = useState<MeResponse["user"]>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
+  const [organizationName, setOrganizationName] = useState("");
+  const [organizationQuery, setOrganizationQuery] = useState("");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"active" | "disabled" | "deleted" | "all">("active");
   const [busy, setBusy] = useState(false);
@@ -93,6 +118,11 @@ export default function AdminPage() {
   const [resetPassword, setResetPassword] = useState("");
   const [resetPasswordConfirm, setResetPasswordConfirm] = useState("");
   const [deletingUser, setDeletingUser] = useState<AdminUser | null>(null);
+  const [editingOrganization, setEditingOrganization] = useState<Organization | null>(null);
+  const [editingOrganizationName, setEditingOrganizationName] = useState("");
+  const [ownerOrganization, setOwnerOrganization] = useState<Organization | null>(null);
+  const [ownerUsername, setOwnerUsername] = useState("");
+  const [deletingOrganization, setDeletingOrganization] = useState<Organization | null>(null);
 
   useEffect(() => {
     setBackHref(sanitizeWorkbenchHref(localStorage.getItem("mr_last_workbench_url")));
@@ -106,11 +136,19 @@ export default function AdminPage() {
     }
     const result = await api<UsersResponse>("/admin/users");
     setUsers(result.users);
+    const organizationResult = await api<OrganizationsResponse>("/organizations");
+    setOrganizations(sortOrganizations(organizationResult.organizations));
   }
 
   useEffect(() => {
-    void load().catch((e) => setError(toZhError(e)));
-  }, []);
+    void load().catch((e) => {
+      if (e?.status === 401) {
+        router.replace("/app");
+        return;
+      }
+      setError(toZhError(e));
+    });
+  }, [router]);
 
   const sortedUsers = useMemo(() => {
     const keyword = query.trim().toLowerCase();
@@ -124,6 +162,14 @@ export default function AdminPage() {
       return matchesQuery && matchesStatus;
     });
   }, [query, statusFilter, users]);
+
+  const sortedOrganizations = useMemo(() => {
+    const keyword = organizationQuery.trim().toLowerCase();
+    return sortOrganizations(organizations).filter((organization) => {
+      if (!keyword) return true;
+      return organization.name.toLowerCase().includes(keyword) || organization.owner?.username.toLowerCase().includes(keyword) || organization.owner?.displayName?.toLowerCase().includes(keyword);
+    });
+  }, [organizationQuery, organizations]);
 
   function replaceUser(next: AdminUser) {
     setUsers((prev) => sortUsers(prev.map((user) => (user.id === next.id ? next : user))));
@@ -256,18 +302,111 @@ export default function AdminPage() {
     }
   }
 
+  async function createOrganization() {
+    const name = organizationName.trim();
+    if (!name) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await api<OrganizationResponse>("/admin/organizations", {
+        method: "POST",
+        body: JSON.stringify({ name })
+      });
+      setOrganizations((prev) => sortOrganizations([...prev, result.organization]));
+      setOrganizationName("");
+      setMessage("组织已创建。");
+    } catch (e) {
+      setError(toZhError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveOrganizationName() {
+    if (!editingOrganization) return;
+    const name = editingOrganizationName.trim();
+    if (!name || name === editingOrganization.name) {
+      setEditingOrganization(null);
+      setEditingOrganizationName("");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await api<OrganizationResponse>(`/admin/organizations/${editingOrganization.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name })
+      });
+      setOrganizations((prev) => sortOrganizations(prev.map((item) => (item.id === result.organization.id ? result.organization : item))));
+      setEditingOrganization(null);
+      setEditingOrganizationName("");
+      setMessage("组织已重命名。");
+    } catch (e) {
+      setError(toZhError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveOrganizationOwner() {
+    if (!ownerOrganization) return;
+    const usernameValue = ownerUsername.trim();
+    if (!usernameValue) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await api<OrganizationResponse>(`/admin/organizations/${ownerOrganization.id}/owner`, {
+        method: "POST",
+        body: JSON.stringify({ username: usernameValue })
+      });
+      setOrganizations((prev) => sortOrganizations(prev.map((item) => (item.id === result.organization.id ? result.organization : item))));
+      setOwnerOrganization(null);
+      setOwnerUsername("");
+      setMessage("组织负责人已更新。");
+    } catch (e) {
+      setError(toZhError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteOrganization() {
+    if (!deletingOrganization) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      await api<{ ok: true }>(`/admin/organizations/${deletingOrganization.id}`, { method: "DELETE" });
+      setOrganizations((prev) => prev.filter((item) => item.id !== deletingOrganization.id));
+      setDeletingOrganization(null);
+      setMessage("组织已删除。");
+    } catch (e) {
+      setError(toZhError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <main className="mr-page">
-      <div className="mr-page__shell">
+      <div className="mr-page__shell mr-page__shell--admin">
         <section className="mr-panel mr-page__hero">
           <div className="mr-page__hero-head">
             <div>
               <div className="mr-page__eyebrow">Admin</div>
               <h1 className="mr-page__title">管理员设置</h1>
             </div>
-            <Link href={backHref} prefetch={false} className="mr-btn mr-page__link">
-              返回工作台
-            </Link>
+            <div className="mr-page__actions">
+              <Link href="/app/organizations" prefetch={false} className="mr-btn mr-page__link">
+                我的组织设置
+              </Link>
+              <Link href={backHref} prefetch={false} className="mr-btn mr-page__link">
+                返回工作台
+              </Link>
+            </div>
           </div>
         </section>
 
@@ -276,7 +415,7 @@ export default function AdminPage() {
 
         {viewer?.globalRole === "admin" ? (
           <div className="mr-page__admin-grid">
-            <section className="mr-panel mr-page__card">
+            <section className="mr-panel mr-page__card mr-page__admin-create-card">
               <div className="mr-page__section-kicker">Create</div>
               <h2 className="mr-page__section-title">新增账号</h2>
 
@@ -316,7 +455,7 @@ export default function AdminPage() {
                 </select>
               </div>
 
-              <div className="mr-page__admin-user-list">
+              <div className="mr-page__admin-user-list mr-page__admin-user-list--accounts">
                 {sortedUsers.map((user) => {
                   const isSelf = viewer?.id === user.id;
                   const isDeleted = Boolean(user.deletedAt);
@@ -383,6 +522,65 @@ export default function AdminPage() {
                   );
                 })}
                 {sortedUsers.length === 0 ? <div className="mr-page__note">没有匹配的账号。</div> : null}
+              </div>
+            </section>
+
+            <section className="mr-panel mr-page__card mr-page__admin-span-card">
+              <div className="mr-page__section-kicker">Organizations</div>
+              <h2 className="mr-page__section-title">组织管理</h2>
+              <p className="mr-page__note">这里管理所有组织本身：创建组织、重命名、删除，以及指定组织负责人。</p>
+
+              <div className="mr-page__actions" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                <div className="mr-page__actions" style={{ alignItems: "center" }}>
+                  <input className="mr-input" value={organizationName} placeholder="新组织名称" onChange={(event) => setOrganizationName(event.target.value)} />
+                  <button className="mr-btn mr-btn--primary" type="button" disabled={busy || !organizationName.trim()} onClick={() => void createOrganization()}>
+                    创建组织
+                  </button>
+                </div>
+                <input className="mr-input" style={{ maxWidth: 260 }} value={organizationQuery} placeholder="搜索组织或负责人" onChange={(event) => setOrganizationQuery(event.target.value)} />
+              </div>
+
+              <div className="mr-page__admin-user-list mr-page__admin-user-list--loose">
+                {sortedOrganizations.map((organization) => (
+                  <div key={organization.id} className="mr-page__user-row">
+                    <div>
+                      <strong>{organization.name}</strong>
+                      <div className="mr-page__user-meta">
+                        <span>负责人 {organization.owner ? `${organization.owner.displayName || organization.owner.username} (@${organization.owner.username})` : "未设置"}</span>
+                        <span>创建于 {formatDate(organization.createdAt)}</span>
+                        <span>最近更新 {formatDate(organization.updatedAt)}</span>
+                      </div>
+                    </div>
+                    <div className="mr-page__actions">
+                      <button
+                        className="mr-btn"
+                        type="button"
+                        disabled={busy}
+                        onClick={() => {
+                          setEditingOrganization(organization);
+                          setEditingOrganizationName(organization.name);
+                        }}
+                      >
+                        重命名
+                      </button>
+                      <button
+                        className="mr-btn"
+                        type="button"
+                        disabled={busy}
+                        onClick={() => {
+                          setOwnerOrganization(organization);
+                          setOwnerUsername(organization.owner?.username ?? "");
+                        }}
+                      >
+                        设置负责人
+                      </button>
+                      <button className="mr-btn mr-btn--danger" type="button" disabled={busy} onClick={() => setDeletingOrganization(organization)}>
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {sortedOrganizations.length === 0 ? <div className="mr-page__note">没有匹配的组织。</div> : null}
               </div>
             </section>
           </div>
@@ -502,6 +700,85 @@ export default function AdminPage() {
         }
       >
         <div className="mr-dialog__note mr-dialog__note--danger">这是账号层面的停用操作。删除后，该用户将无法继续使用当前账号登录。</div>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(editingOrganization)}
+        title="重命名组织"
+        description={editingOrganization ? `修改“${editingOrganization.name}”的组织名称。` : undefined}
+        onClose={() => {
+          if (busy) return;
+          setEditingOrganization(null);
+          setEditingOrganizationName("");
+        }}
+        footer={
+          <>
+            <button type="button" className="mr-btn mr-btn--ghost" disabled={busy} onClick={() => setEditingOrganization(null)}>
+              取消
+            </button>
+            <button type="button" className="mr-btn mr-btn--primary" disabled={busy || !editingOrganizationName.trim()} onClick={() => void saveOrganizationName()}>
+              {busy ? "保存中…" : "保存名称"}
+            </button>
+          </>
+        }
+      >
+        <div className="mr-dialog__stack">
+          <label className="mr-field">
+            <span className="mr-field__label">组织名称</span>
+            <input autoFocus className="mr-input" value={editingOrganizationName} onChange={(event) => setEditingOrganizationName(event.target.value)} />
+          </label>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(ownerOrganization)}
+        title="设置组织负责人"
+        description={ownerOrganization ? `指定“${ownerOrganization.name}”的负责人。` : undefined}
+        onClose={() => {
+          if (busy) return;
+          setOwnerOrganization(null);
+          setOwnerUsername("");
+        }}
+        footer={
+          <>
+            <button type="button" className="mr-btn mr-btn--ghost" disabled={busy} onClick={() => setOwnerOrganization(null)}>
+              取消
+            </button>
+            <button type="button" className="mr-btn mr-btn--primary" disabled={busy || !ownerUsername.trim()} onClick={() => void saveOrganizationOwner()}>
+              {busy ? "保存中…" : "保存负责人"}
+            </button>
+          </>
+        }
+      >
+        <div className="mr-dialog__stack">
+          <label className="mr-field">
+            <span className="mr-field__label">负责人用户名</span>
+            <input autoFocus className="mr-input" value={ownerUsername} placeholder="输入现有用户名" onChange={(event) => setOwnerUsername(event.target.value)} />
+          </label>
+          <div className="mr-dialog__note">保存后，原负责人会降为组织管理员，新负责人会自动加入该组织。</div>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(deletingOrganization)}
+        title="删除组织"
+        description={deletingOrganization ? `你将删除“${deletingOrganization.name}”。` : undefined}
+        onClose={() => {
+          if (busy) return;
+          setDeletingOrganization(null);
+        }}
+        footer={
+          <>
+            <button type="button" className="mr-btn mr-btn--ghost" disabled={busy} onClick={() => setDeletingOrganization(null)}>
+              取消
+            </button>
+            <button type="button" className="mr-btn mr-btn--danger" disabled={busy} onClick={() => void deleteOrganization()}>
+              {busy ? "处理中…" : "确认删除"}
+            </button>
+          </>
+        }
+      >
+        <div className="mr-dialog__note mr-dialog__note--danger">如果组织下还有项目，系统会拒绝删除。</div>
       </Dialog>
     </main>
   );

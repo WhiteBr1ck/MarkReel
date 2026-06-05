@@ -6,7 +6,8 @@ import { clearAuthCookies, setAuthCookies } from "../auth/tokens";
 import { auditLog } from "../audit";
 import { getStore } from "../store";
 import { env } from "../env";
-import { presignGetObject, putObjectStream } from "../s3";
+import { presignGetObject } from "../s3";
+import { putRequestBodyObject } from "../uploadProxy";
 import type { StoreUser } from "../store/types";
 
 const UpdateProfileSchema = z.object({
@@ -117,12 +118,11 @@ export async function userRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "invalid_object_key" });
     }
 
-    await putObjectStream({
+    await putRequestBodyObject({
+      req,
       bucket: env.S3_BUCKET_ATTACHMENTS,
       objectKey,
-      body: req.raw,
-      contentType: req.headers["content-type"] ?? undefined,
-      contentLength: req.headers["content-length"] ? Number(req.headers["content-length"]) : undefined
+      contentType: req.headers["content-type"] ?? undefined
     });
 
     return reply.send({ ok: true, objectKey });

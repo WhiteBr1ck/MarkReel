@@ -16,6 +16,19 @@ const UpdateMemberSchema = z.object({
   role: MemberRoleSchema
 });
 
+const ProjectPermissionSchema = z.enum(["manage", "upload", "view"]);
+const PermissionSubjectSchema = z.enum(["organization", "invited_user"]);
+
+const PermissionGrantSchema = z.object({
+  subjectType: PermissionSubjectSchema,
+  subjectUserId: z.string().nullable().optional(),
+  permission: ProjectPermissionSchema
+});
+
+const ReplaceProjectPermissionsSchema = z.object({
+  grants: z.array(PermissionGrantSchema)
+});
+
 function serializeMember(member: {
   role: ProjectRole;
   createdAt: Date;
@@ -47,6 +60,77 @@ async function requireMemberManagement(userId: string, projectId: string, reply:
 }
 
 export async function projectMemberRoutes(app: FastifyInstance) {
+  app.get("/projects/:projectId/permissions", { preHandler: requireUser }, async (req, reply) => {
+    const userId = getUserId(req);
+    const projectId = (req.params as any).projectId as string;
+    const access = await getProjectAccess({ userId, projectId });
+    if (!access) return reply.code(404).send({ error: "not_found" });
+
+    const project = await prisma.project.findFirst({ where: { id: projectId, deletedAt: null }, select: { ownerId: true, organizationId: true } });
+    if (!project) return reply.code(404).send({ error: "not_found" });
+    const grants = await prisma.projectPermissionGrant.findMany({
+      where: { projectId },
+      orderBy: [{ subjectType: "asc" }, { createdAt: "asc" }],
+      include: { subjectUser: { select: { id: true, username: true, displayName: true, avatarPreset: true } } }
+    });
+    return {
+      project: { id: projectId, ownerId: project.ownerId, organizationId: project.organizationId },
+      grants: grants.map((grant) => ({
+        id: grant.id,
+        subjectType: grant.subjectType,
+        subjectUserId: grant.subjectUserId,
+        permission: grant.permission,
+        user: grant.subjectUser,
+        locked: grant.subjectType === "creator"
+      }))
+    };
+  });
+
+  app.put("/projects/:projectId/permissions", { preHandler: requireUser }, async (req, reply) => {
+    const userId = getUserId(req);
+    const projectId = (req.params as any).projectId as string;
+    const input = ReplaceProjectPermissionsSchema.parse(req.body);
+    const access = await requireMemberManagement(userId, projectId, reply);
+    if (!access) return;
+
+    const project = await prisma.project.findFirst({ where: { id: projectId, deletedAt: null }, select: { ownerId: true, organizationId: true } });
+    if (!project) return reply.code(404).send({ error: "not_found" });
+
+    const organizationUserIds = project.organizationId
+      ? new Set((await prisma.organizationMember.findMany({ where: { organizationId: project.organizationId }, select: { userId: true } })).map((member) => member.userId))
+      : new Set<string>();
+
+    for (const grant of input.grants) {
+      if (grant.subjectType === "organization" && !project.organizationId) return reply.code(400).send({ error: "project_without_organization" });
+      if (grant.subjectType === "invited_user") {
+        if (!grant.subjectUserId) return reply.code(400).send({ error: "missing_subject_user" });
+        if (grant.subjectUserId === project.ownerId) return reply.code(400).send({ error: "owner_role_locked" });
+        if (project.organizationId && !organizationUserIds.has(grant.subjectUserId)) return reply.code(400).send({ error: "user_not_in_organization" });
+      }
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.projectPermissionGrant.deleteMany({ where: { projectId, subjectType: { not: "creator" } } });
+      await tx.projectPermissionGrant.createMany({
+        data: input.grants.map((grant) => ({
+          projectId,
+          subjectType: grant.subjectType,
+          subjectKey: grant.subjectType === "invited_user" ? grant.subjectUserId ?? "" : "",
+          subjectUserId: grant.subjectType === "invited_user" ? grant.subjectUserId ?? null : null,
+          permission: grant.permission
+        }))
+      });
+      await Promise.all(["manage", "upload", "view"].map((permission) => tx.projectPermissionGrant.upsert({
+        where: { projectId_subjectType_subjectKey_permission: { projectId, subjectType: "creator", subjectKey: "", permission: permission as any } },
+        update: {},
+        create: { projectId, subjectType: "creator", subjectKey: "", subjectUserId: null, permission: permission as any }
+      })));
+    });
+
+    await auditLog({ req, actorUserId: userId, action: "project_permissions.replace", entityType: "Project", entityId: projectId, meta: { grants: input.grants } });
+    return { ok: true };
+  });
+
   app.get("/projects/:projectId/members", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const projectId = (req.params as any).projectId as string;

@@ -2,7 +2,9 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { IconChevron } from "../_components/icons";
+import { api } from "../_components/api";
 import { type Accent, type Language, type Theme, useUiPreferences } from "../_components/theme";
 
 function sanitizeWorkbenchHref(value: string | null): string {
@@ -20,14 +22,37 @@ const ACCENTS: Accent[] = ["clay", "blue", "green", "violet", "amber"];
 const LANGUAGES: Language[] = ["zh-CN", "en"];
 const THEMES: Theme[] = ["dark", "light", "system"];
 
+type MeResponse = { user: { id: string } | null };
+
 export default function SettingsPage() {
+  const router = useRouter();
   const { preferences, patchPreferences, labels } = useUiPreferences();
   const [backHref, setBackHref] = useState<string>("/app");
+  const [authReady, setAuthReady] = useState(false);
   const [languageMenuOpen, setLanguageMenuOpen] = useState(false);
 
   useEffect(() => {
     setBackHref(sanitizeWorkbenchHref(localStorage.getItem("mr_last_workbench_url")));
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api<MeResponse>("/me")
+      .then((result) => {
+        if (cancelled) return;
+        if (!result.user) {
+          router.replace("/app");
+          return;
+        }
+        setAuthReady(true);
+      })
+      .catch(() => {
+        if (!cancelled) router.replace("/app");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   useEffect(() => {
     if (!languageMenuOpen) return;
@@ -65,6 +90,8 @@ export default function SettingsPage() {
     }),
     [labels.common]
   );
+
+  if (!authReady) return null;
 
   return (
     <main className="mr-page">

@@ -25,10 +25,11 @@ export type Project = {
   id: string;
   name: string;
   ownerId: string;
+  organizationId?: string | null;
   createdAt: string;
   updatedAt: string;
   role?: "owner" | "editor" | "commenter" | "viewer";
-  accessSource?: "owner" | "member";
+  accessSource?: "owner" | "project_grant" | "legacy_member";
   capabilities?: string[];
 };
 
@@ -87,6 +88,7 @@ type Props = {
   onGoSettings: () => void;
   onGoUserSettings: () => void;
   onGoAdminSettings?: () => void;
+  onGoOrganizationSettings?: () => void;
   onGoAbout: () => void;
 
   uploads?: UploadItem[];
@@ -142,7 +144,7 @@ function PrimaryNav({
   return (
     <aside className="mr-shell__nav">
       <div className="mr-shell__brand" title="MarkReel">
-        MR
+        <img src="/logo.png" alt="MarkReel" />
       </div>
 
       <div className="mr-shell__nav-group">
@@ -273,13 +275,15 @@ function Topbar({
   user,
   onLogout,
   onGoUserSettings,
-  onGoAdminSettings
+  onGoAdminSettings,
+  onGoOrganizationSettings
 }: {
   title: string;
   user: ApiUser;
   onLogout: () => void;
   onGoUserSettings: () => void;
   onGoAdminSettings?: () => void;
+  onGoOrganizationSettings?: () => void;
 }) {
   const { labels } = useUiPreferences();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -327,6 +331,11 @@ function Topbar({
                   {labels.shell.adminSettings}
                 </button>
               ) : null}
+              {isAdmin && onGoOrganizationSettings ? (
+                <button className="mr-btn" style={{ width: "100%" }} onClick={onGoOrganizationSettings}>
+                  组织设置
+                </button>
+              ) : null}
               <button className="mr-btn mr-btn--danger" style={{ width: "100%" }} onClick={onLogout}>
                 {labels.shell.logout}
               </button>
@@ -352,6 +361,7 @@ export function AppShell(props: Props) {
           onLogout={props.onLogout}
           onGoUserSettings={props.onGoUserSettings}
           onGoAdminSettings={props.onGoAdminSettings}
+          onGoOrganizationSettings={props.onGoOrganizationSettings}
         />
 
         {props.showUploads === false ? null : (

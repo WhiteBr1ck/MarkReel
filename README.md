@@ -1,82 +1,91 @@
-# MarkReel
+<p align="center">
+  <img src="assets/logo.png" alt="MarkReel" width="96" height="96" />
+</p>
 
-MarkReel 是一个开源、自托管的视频审阅与标注工具，面向个人/小团队（1-50 人）。
+<h1 align="center">MarkReel</h1>
 
-核心能力（规划/建设中）：
-- 上传视频：保留原视频或选择压缩
-- 浏览器播放：HLS（m3u8）为主
-- 视频标注：按时间点 + 画面位置标注，显示标注者
-- 标注附件：支持插入图片
-- 访客/外链：通过分享链接访问（可设置权限/过期）
+<p align="center">自托管视频审阅与标注工具。</p>
 
-## 快速开始（本机调试，不用 Docker）
+<p align="center">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.0-4f8f5d" />
+  <img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0--only-555" />
+</p>
 
-前提：当前默认使用 `inmemory` 存储（开发模式），不需要 PostgreSQL。
+## 功能
 
-可选依赖（有的话功能更完整）：
-- Redis（用于队列/worker）：`localhost:6379`
-- MinIO（用于对象存储）：`localhost:9000`
+- 项目、文件夹和视频管理
+- 视频上传、处理、播放和下载
+- 时间点标注、回复、画面标记和图片附件
+- 账号、组织、角色和权限管理
+- 视频分享链接，支持查看或标注权限
+- 标注导出到剪贴板、CSV、TXT 和章节文本
 
-启动（Windows）：
+## 部署
+
+只需要 Docker 和 Docker Compose。
+
+1. 创建本机配置文件。
 
 ```bash
-npm run dev:local
+cp .env.example .env.docker
 ```
 
-启动（Linux/macOS）：
+Windows PowerShell：
 
-```bash
-npm run dev:local:unix
+```powershell
+Copy-Item .env.example .env.docker
 ```
 
-打开：
-- Web: http://localhost:5090
-- API: http://localhost:4000/api
+2. 默认管理员账号如下。
 
-说明：
-- `dev:local` 会写入一个 `.env.local`，用于保证本机环境走 `localhost`，避免 `.env` 里 docker 主机名导致连接失败。
-- 如果你的 `5090` 或 `4000` 端口被占用，脚本会直接报错并提示 PID。
+```text
+用户名：admin
+密码：adminadmin
+```
 
-## 账号注册与登录
+如需在首次启动前修改管理员账号密码，只改 `.env.docker` 里的这两个字段：
 
-当前版本没有默认账号。
+```text
+MARKREEL_ADMIN_USERNAME=admin
+MARKREEL_ADMIN_PASSWORD=adminadmin
+```
 
-1. 打开 Web：`http://localhost:5090/app`
-2. 点击“注册”，输入邮箱 + 密码（>= 8 位）创建账号
-3. 之后用同一邮箱 + 密码登录
+其他配置已有默认值，直接启动即可。
 
-提示：当前默认是 `inmemory` 存储，重启 API 会清空已注册账号。
-
-## Docker Compose 一键运行（完整媒体链路）
-
-当前 `docker-compose.yml` 会启动完整本地栈：
-- Web: Next.js，宿主机端口 `5090`
-- API: Fastify，仅 Docker 内部访问
-- Worker: BullMQ + ffmpeg/ffprobe，仅 Docker 内部运行
-- Redis: 队列，仅 Docker 内部访问
-- MinIO: S3 兼容对象存储，仅 Docker 内部访问
-- SQLite: Prisma 文件数据库，保存在 Docker volume `markreel_sqlite-data`
-
-启动：
+3. 启动。
 
 ```bash
 docker compose up -d --build
 ```
 
-打开：
-- Web: http://localhost:5090/app
-- API 和对象存储都通过 Web 的 `/api/*` 同源代理访问，宿主机不暴露额外端口。
-
-默认开发管理员账号：
+4. 打开。
 
 ```text
-admin / adminpass123
+http://localhost:5090
 ```
 
-查看状态和日志：
+API、Redis、MinIO 和 Worker 不暴露宿主机端口。前端通过 `/api/*` 访问后端。
+
+## 使用
+
+1. 使用默认管理员账号 `admin` / `adminadmin` 登录，或使用 `.env.docker` 中配置的管理员账号登录。
+2. 在管理员设置中创建账号和组织。
+3. 创建项目，上传视频。
+4. 视频处理完成后进入审片播放器。
+5. 添加标注、回复、附件或画面标记。
+6. 按需要配置视频权限或分享链接。
+
+## 运维
+
+查看服务：
 
 ```bash
 docker compose ps
+```
+
+查看日志：
+
+```bash
 docker compose logs -f --tail=120 api worker web
 ```
 
@@ -86,33 +95,14 @@ docker compose logs -f --tail=120 api worker web
 docker compose down
 ```
 
-清空本地数据（会删除账号、项目、媒体对象和队列数据）：
+清空本地数据：
 
 ```bash
 docker compose down -v
 ```
 
-安全提示：
-- 在公网暴露前务必修改 `.env.docker` 中的 `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` / `JWT_AUTH_INSTANCE_ID` / 管理员密码 / MinIO 密码。
+该命令会删除账号、项目、媒体文件、对象存储和队列数据。
 
-## 从 inmemory 切换到 PostgreSQL（可还原）
-
-当你准备接入数据库时：
-1. 安装并启动 PostgreSQL
-2. 设置 `.env`：
-   - `MARKREEL_STORE=prisma`
-   - `DATABASE_URL=postgresql://...`
-3. 运行：`npm -w @markreel/api run db:generate`
-4. 运行：`npm -w @markreel/api run db:push`
-
-
-## 目录结构
-
-- `apps/web` - Next.js WebUI
-- `apps/api` - Fastify API
-- `apps/worker` - 媒体处理 Worker（ffmpeg 任务）
-- `packages/shared` - 共享类型/工具
-- `infra` - Docker 与基础设施文件
 
 ## License
 

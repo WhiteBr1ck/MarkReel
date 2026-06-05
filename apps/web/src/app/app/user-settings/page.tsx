@@ -2,6 +2,7 @@
 
 import Avatar from "boring-avatars";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Dialog } from "../_components/dialog";
@@ -138,6 +139,7 @@ function drawCroppedAvatar(crop: CropState): Promise<File> {
 }
 
 export default function UserSettingsPage() {
+  const router = useRouter();
   const avatarFileInputRef = useRef<HTMLInputElement | null>(null);
   const [backHref, setBackHref] = useState("/app");
   const [user, setUser] = useState<ApiUser | null>(null);
@@ -168,9 +170,9 @@ export default function UserSettingsPage() {
       })
       .catch(() => {
         setUser(null);
-        setError("登录已失效，请返回工作台重新登录。");
+        router.replace("/app");
       });
-  }, []);
+  }, [router]);
 
   useEffect(() => {
     return () => {
@@ -372,6 +374,14 @@ export default function UserSettingsPage() {
     setCrop((current) => current ? { ...current, zoom: clamp(current.zoom + delta, 1, 3) } : current);
   }
 
+  function centerCropImage() {
+    setCrop((current) => current ? { ...current, offsetX: 0, offsetY: 0 } : current);
+  }
+
+  function resetCropImage() {
+    setCrop((current) => current ? { ...current, offsetX: 0, offsetY: 0, zoom: 1 } : current);
+  }
+
   function closeAvatarDialog() {
     if (busy) return;
     setAvatarDialogOpen(false);
@@ -558,9 +568,17 @@ export default function UserSettingsPage() {
                 )}
               </div>
               <div className="mr-avatar-dialog__crop-actions">
-                <button type="button" className="mr-btn" onClick={() => avatarFileInputRef.current?.click()} disabled={busy}>
-                  选择图片
-                </button>
+                <div className="mr-avatar-dialog__crop-action-group">
+                  <button type="button" className="mr-btn" onClick={() => avatarFileInputRef.current?.click()} disabled={busy}>
+                    选择图片
+                  </button>
+                  <button type="button" className="mr-btn" onClick={centerCropImage} disabled={busy || !crop}>
+                    照片居中
+                  </button>
+                  <button type="button" className="mr-btn" onClick={resetCropImage} disabled={busy || !crop}>
+                    默认大小
+                  </button>
+                </div>
                 <input ref={avatarFileInputRef} type="file" accept="image/*" hidden onChange={(event) => onPickAvatar(event.target.files?.[0] ?? null)} />
                 <span className="mr-avatar-dialog__wheel-hint">滚轮缩放，拖动调整位置</span>
               </div>

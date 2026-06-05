@@ -45,9 +45,9 @@ export async function setAuthCookies(reply: any, payload: { userId: string; sess
   const accessToken = await reply.jwtSign(tokenPayload, {
     expiresIn: env.JWT_ACCESS_TTL_SECONDS
   });
-  const refreshToken = await reply.jwtSign(tokenPayload, {
+  const refreshToken = reply.server.jwt.sign(tokenPayload, {
     expiresIn: env.JWT_REFRESH_TTL_SECONDS,
-    secret: env.JWT_REFRESH_SECRET
+    key: env.JWT_REFRESH_SECRET
   });
 
   reply.setCookie(ACCESS_COOKIE, accessToken, {
@@ -69,4 +69,8 @@ export async function setAuthCookies(reply: any, payload: { userId: string; sess
 export function clearAuthCookies(reply: any) {
   reply.clearCookie(ACCESS_COOKIE, { path: "/" });
   reply.clearCookie(REFRESH_COOKIE, { path: "/api/auth/refresh" });
+}
+
+export function clearAccessCookie(reply: any) {
+  reply.clearCookie(ACCESS_COOKIE, { path: "/" });
 }

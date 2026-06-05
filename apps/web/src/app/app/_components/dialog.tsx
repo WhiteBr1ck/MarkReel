@@ -9,10 +9,11 @@ type DialogProps = {
   description?: string;
   children: ReactNode;
   footer?: ReactNode;
+  size?: "default" | "wide";
   onClose: () => void;
 };
 
-export function Dialog({ open, title, description, children, footer, onClose }: DialogProps) {
+export function Dialog({ open, title, description, children, footer, size = "default", onClose }: DialogProps) {
   const titleId = useId();
   const descId = useId();
 
@@ -30,7 +31,7 @@ export function Dialog({ open, title, description, children, footer, onClose }: 
   return (
     <div className="mr-dialog-backdrop" onClick={onClose} role="presentation">
       <div
-        className="mr-dialog"
+        className={`mr-dialog${size === "wide" ? " mr-dialog--wide" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}

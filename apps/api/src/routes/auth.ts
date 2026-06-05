@@ -95,10 +95,13 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.post("/auth/refresh", async (req, reply) => {
     try {
-      const rawPayload = await (req as any).jwtVerify({
-        secret: env.JWT_REFRESH_SECRET,
-        cookie: { cookieName: REFRESH_COOKIE }
-      });
+      const refreshToken = req.cookies[REFRESH_COOKIE];
+      if (!refreshToken) {
+        clearAuthCookies(reply);
+        return reply.code(401).send({ error: "unauthorized" });
+      }
+
+      const rawPayload = app.jwt.verify(refreshToken, { key: env.JWT_REFRESH_SECRET });
       const payload = parseAuthTokenPayload(rawPayload);
       if (!payload || payload.si !== authInstanceId) {
         clearAuthCookies(reply);

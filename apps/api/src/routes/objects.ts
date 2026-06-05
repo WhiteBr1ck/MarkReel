@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { env } from "../env";
-import { getObjectStream, putObjectStream } from "../s3";
+import { getObjectStream } from "../s3";
+import { putRequestBodyObject } from "../uploadProxy";
 import { requireUser } from "../auth/requireUser";
 
 function bucketAllowed(bucket: string) {
@@ -32,12 +33,11 @@ export async function objectRoutes(app: FastifyInstance) {
     const objectKey = (req.params as any)["*"] as string;
     if (!bucketAllowed(bucket) || !objectKey) return reply.code(404).send({ error: "not_found" });
 
-    await putObjectStream({
+    await putRequestBodyObject({
+      req,
       bucket,
       objectKey,
-      body: req.raw,
-      contentType: req.headers["content-type"] ?? undefined,
-      contentLength: req.headers["content-length"] ? Number(req.headers["content-length"]) : undefined
+      contentType: req.headers["content-type"] ?? undefined
     });
 
     return reply.send({ ok: true, objectKey });

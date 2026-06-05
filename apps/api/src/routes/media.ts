@@ -10,10 +10,11 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import { prisma } from "../db";
 import { getUserId, requireUser } from "../auth/requireUser";
-import { presignGetObject, putObjectStream, statObject, getObjectStream } from "../s3";
+import { presignGetObject, statObject, getObjectStream } from "../s3";
+import { putRequestBodyObject } from "../uploadProxy";
 import { env } from "../env";
 import { auditLog } from "../audit";
-import { getMediaProjectAccess, getProjectAccess, hasCapability } from "../access";
+import { getMediaAccess, getProjectAccess, hasCapability, hasMediaCapability } from "../access";
 import { mediaQueue } from "../queue";
 
 const CreateMediaSchema = z.object({
@@ -43,6 +44,19 @@ const EnqueueSchema = z.object({
   mode: z.enum(["original", "compress"]),
   originalObjectKey: z.string().min(1),
   transcode: TranscodeSchema.optional()
+});
+
+const MediaPermissionSchema = z.enum(["manage", "annotate", "view"]);
+const MediaPermissionSubjectSchema = z.enum(["organization", "invited_user", "public"]);
+
+const MediaPermissionGrantSchema = z.object({
+  subjectType: MediaPermissionSubjectSchema,
+  subjectUserId: z.string().nullable().optional(),
+  permission: MediaPermissionSchema
+});
+
+const ReplaceMediaPermissionsSchema = z.object({
+  grants: z.array(MediaPermissionGrantSchema)
 });
 
 const PreviewQuerySchema = z.object({
@@ -184,21 +198,21 @@ async function getPreviewTargetForMedia(mediaId: string) {
   return { media, target };
 }
 
-async function assertProjectAccess(userId: string, projectId: string, capability: "project:view" | "project:edit_assets" = "project:view") {
+async function assertProjectAccess(userId: string, projectId: string, capability: "project:view" | "project:upload" | "project:manage_members" | "project:edit_assets" = "project:view") {
   const access = await getProjectAccess({ userId, projectId });
   return access && hasCapability(access, capability) ? access : null;
 }
 
-async function assertMediaAccess(userId: string, mediaId: string, capability: "project:view" | "project:edit_assets" = "project:view") {
-  const result = await getMediaProjectAccess({ userId, mediaId });
-  if (!result || !hasCapability(result.access, capability)) return null;
-  return { id: result.media.id, projectId: result.media.projectId };
+async function assertMediaAccess(userId: string, mediaId: string, capability: "media:view" | "media:manage" = "media:view") {
+  const result = await getMediaAccess({ userId, mediaId });
+  if (!result || !hasMediaCapability(result.access, capability)) return null;
+  return { id: result.media.id, projectId: result.media.projectId, mediaAccess: result.access };
 }
 
-async function assertMediaAccessIncludingDeleted(userId: string, mediaId: string, capability: "project:view" | "project:edit_assets" = "project:view") {
-  const result = await getMediaProjectAccess({ userId, mediaId, includeDeleted: true });
-  if (!result || !hasCapability(result.access, capability)) return null;
-  return { id: result.media.id, projectId: result.media.projectId, deletedAt: result.media.deletedAt };
+async function assertMediaAccessIncludingDeleted(userId: string, mediaId: string, capability: "media:view" | "media:manage" = "media:view") {
+  const result = await getMediaAccess({ userId, mediaId, includeDeleted: true });
+  if (!result || !hasMediaCapability(result.access, capability)) return null;
+  return { id: result.media.id, projectId: result.media.projectId, deletedAt: result.media.deletedAt, mediaAccess: result.access };
 }
 
 async function assertFolderAccess(projectId: string, folderId: string | null | undefined) {
@@ -244,13 +258,14 @@ function mediaSelect(userId: string) {
     updatedAt: true,
     project: {
       select: {
-        owner: {
-          select: {
-            id: true,
-            username: true,
-            displayName: true
-          }
-        }
+        organizationId: true
+      }
+    },
+    creator: {
+      select: {
+        id: true,
+        username: true,
+        displayName: true
       }
     },
     files: {
@@ -289,7 +304,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       const projectId = (req.params as any).projectId as string;
       const input = CreateMediaSchema.parse(req.body);
 
-      const ok = await assertProjectAccess(userId, projectId, "project:edit_assets");
+      const ok = await assertProjectAccess(userId, projectId, "project:upload");
       if (!ok) return reply.code(404).send({ error: "not_found" });
 
       const folderOk = await assertFolderAccess(projectId, input.folderId ?? null);
@@ -298,9 +313,13 @@ export async function mediaRoutes(app: FastifyInstance) {
       const media = await prisma.media.create({
         data: {
           projectId,
+          creatorId: userId,
           folderId: input.folderId ?? null,
           title: input.title,
-          seriesId: input.seriesId ?? null
+          seriesId: input.seriesId ?? null,
+          permissionGrants: {
+            create: ["manage", "annotate", "view"].map((permission) => ({ subjectType: "creator", subjectKey: "", permission: permission as any }))
+          }
         },
         select: {
           id: true,
@@ -334,11 +353,90 @@ export async function mediaRoutes(app: FastifyInstance) {
     }
   );
 
+  app.get("/media/:mediaId/permissions", { preHandler: requireUser }, async (req, reply) => {
+    const userId = getUserId(req);
+    const mediaId = (req.params as any).mediaId as string;
+    const access = await assertMediaAccess(userId, mediaId, "media:view");
+    if (!access) return reply.code(404).send({ error: "not_found" });
+
+    const media = await prisma.media.findFirst({
+      where: { id: mediaId, deletedAt: null },
+      select: { id: true, projectId: true, creatorId: true, project: { select: { organizationId: true } } }
+    });
+    if (!media) return reply.code(404).send({ error: "not_found" });
+
+    const grants = await prisma.mediaPermissionGrant.findMany({
+      where: { mediaId },
+      orderBy: [{ subjectType: "asc" }, { createdAt: "asc" }],
+      include: { subjectUser: { select: { id: true, username: true, displayName: true, avatarPreset: true } } }
+    });
+
+    return {
+      media: { id: media.id, projectId: media.projectId, creatorId: media.creatorId, organizationId: media.project.organizationId },
+      grants: grants.map((grant) => ({
+        id: grant.id,
+        subjectType: grant.subjectType,
+        subjectUserId: grant.subjectUserId,
+        permission: grant.permission,
+        user: grant.subjectUser,
+        locked: grant.subjectType === "creator"
+      }))
+    };
+  });
+
+  app.put("/media/:mediaId/permissions", { preHandler: requireUser }, async (req, reply) => {
+    const userId = getUserId(req);
+    const mediaId = (req.params as any).mediaId as string;
+    const input = ReplaceMediaPermissionsSchema.parse(req.body);
+    const access = await assertMediaAccess(userId, mediaId, "media:manage");
+    if (!access) return reply.code(404).send({ error: "not_found" });
+
+    const media = await prisma.media.findFirst({
+      where: { id: mediaId, deletedAt: null },
+      select: { creatorId: true, project: { select: { organizationId: true } } }
+    });
+    if (!media) return reply.code(404).send({ error: "not_found" });
+
+    const organizationUserIds = media.project.organizationId
+      ? new Set((await prisma.organizationMember.findMany({ where: { organizationId: media.project.organizationId }, select: { userId: true } })).map((member) => member.userId))
+      : new Set<string>();
+
+    for (const grant of input.grants) {
+      if (grant.subjectType === "organization" && !media.project.organizationId) return reply.code(400).send({ error: "project_without_organization" });
+      if (grant.subjectType === "invited_user") {
+        if (!grant.subjectUserId) return reply.code(400).send({ error: "missing_subject_user" });
+        if (grant.subjectUserId === media.creatorId) return reply.code(400).send({ error: "creator_permission_locked" });
+        if (media.project.organizationId && !organizationUserIds.has(grant.subjectUserId)) return reply.code(400).send({ error: "user_not_in_organization" });
+      }
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.mediaPermissionGrant.deleteMany({ where: { mediaId, subjectType: { not: "creator" } } });
+      await tx.mediaPermissionGrant.createMany({
+        data: input.grants.map((grant) => ({
+          mediaId,
+          subjectType: grant.subjectType,
+          subjectKey: grant.subjectType === "invited_user" ? grant.subjectUserId ?? "" : "",
+          subjectUserId: grant.subjectType === "invited_user" ? grant.subjectUserId ?? null : null,
+          permission: grant.permission
+        }))
+      });
+      await Promise.all(["manage", "annotate", "view"].map((permission) => tx.mediaPermissionGrant.upsert({
+        where: { mediaId_subjectType_subjectKey_permission: { mediaId, subjectType: "creator", subjectKey: "", permission: permission as any } },
+        update: {},
+        create: { mediaId, subjectType: "creator", subjectKey: "", subjectUserId: null, permission: permission as any }
+      })));
+    });
+
+    await auditLog({ req, actorUserId: userId, action: "media_permissions.replace", entityType: "Media", entityId: mediaId, meta: { grants: input.grants } });
+    return { ok: true };
+  });
+
   app.patch("/media/:mediaId", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const mediaId = (req.params as any).mediaId as string;
     const input = UpdateMediaSchema.parse(req.body);
-    const access = await assertMediaAccess(userId, mediaId, input.rating !== undefined && input.title === undefined && input.folderId === undefined ? "project:view" : "project:edit_assets");
+    const access = await assertMediaAccess(userId, mediaId, input.rating !== undefined && input.title === undefined && input.folderId === undefined ? "media:view" : "media:manage");
     if (!access) return reply.code(404).send({ error: "not_found" });
 
     if (input.folderId !== undefined) {
@@ -352,16 +450,7 @@ export async function mediaRoutes(app: FastifyInstance) {
         ...(input.title !== undefined ? { title: input.title } : {}),
         ...(input.folderId !== undefined ? { folderId: input.folderId } : {})
       },
-      select: {
-        id: true,
-        projectId: true,
-        folderId: true,
-        title: true,
-        status: true,
-        reviewStatus: true,
-        createdAt: true,
-        updatedAt: true
-      }
+      select: { id: true, title: true, folderId: true }
     });
 
     if (input.rating !== undefined) {
@@ -377,6 +466,11 @@ export async function mediaRoutes(app: FastifyInstance) {
     }
 
     const rating = await getRatingSummary(mediaId, userId);
+    const fullMedia = await prisma.media.findUnique({
+      where: { id: mediaId },
+      select: mediaSelect(userId)
+    });
+    if (!fullMedia) return reply.code(404).send({ error: "not_found" });
 
     await auditLog({
       req,
@@ -387,13 +481,38 @@ export async function mediaRoutes(app: FastifyInstance) {
       meta: { title: media.title, folderId: media.folderId, rating: input.rating }
     });
 
-    return reply.send({ media: { ...media, ...rating } });
+    return reply.send({
+      media: {
+        id: fullMedia.id,
+        projectId: fullMedia.projectId,
+        folderId: fullMedia.folderId,
+        title: fullMedia.title,
+        status: fullMedia.status,
+        reviewStatus: fullMedia.reviewStatus,
+        versionIndex: fullMedia.versionIndex,
+        seriesId: fullMedia.seriesId,
+        createdAt: fullMedia.createdAt,
+        updatedAt: fullMedia.updatedAt,
+        capabilities: access.mediaAccess.capabilities,
+        projectCapabilities: access.mediaAccess.projectAccess.capabilities,
+        organizationId: fullMedia.project.organizationId,
+        creator: fullMedia.creator
+          ? {
+              id: fullMedia.creator.id,
+              username: fullMedia.creator.username,
+              displayName: fullMedia.creator.displayName
+            }
+          : null,
+        files: fullMedia.files,
+        ...rating
+      }
+    });
   });
 
   app.delete("/media/:mediaId", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const mediaId = (req.params as any).mediaId as string;
-    const access = await assertMediaAccess(userId, mediaId, "project:edit_assets");
+    const access = await assertMediaAccess(userId, mediaId, "media:manage");
     if (!access) return reply.code(404).send({ error: "not_found" });
 
     const media = await prisma.media.update({
@@ -464,7 +583,7 @@ export async function mediaRoutes(app: FastifyInstance) {
   app.post("/media/:mediaId/restore", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const mediaId = (req.params as any).mediaId as string;
-    const access = await assertMediaAccessIncludingDeleted(userId, mediaId, "project:edit_assets");
+    const access = await assertMediaAccessIncludingDeleted(userId, mediaId, "media:manage");
     if (!access || !access.deletedAt) return reply.code(404).send({ error: "not_found" });
 
     const media = await prisma.media.update({
@@ -488,7 +607,7 @@ export async function mediaRoutes(app: FastifyInstance) {
   app.delete("/projects/:projectId/trash", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const projectId = (req.params as any).projectId as string;
-    const ok = await assertProjectAccess(userId, projectId, "project:edit_assets");
+    const ok = await assertProjectAccess(userId, projectId, "project:manage_members");
     if (!ok) return reply.code(404).send({ error: "not_found" });
 
     const trashed = await prisma.media.findMany({
@@ -558,11 +677,14 @@ export async function mediaRoutes(app: FastifyInstance) {
         seriesId: media.seriesId,
         createdAt: media.createdAt,
         updatedAt: media.updatedAt,
-        creator: media.project.owner
+        capabilities: access.mediaAccess.capabilities,
+        projectCapabilities: access.mediaAccess.projectAccess.capabilities,
+        organizationId: media.project.organizationId,
+        creator: media.creator
           ? {
-              id: media.project.owner.id,
-              username: media.project.owner.username,
-              displayName: media.project.owner.displayName
+              id: media.creator.id,
+              username: media.creator.username,
+              displayName: media.creator.displayName
             }
           : null,
         files: media.files,
@@ -700,7 +822,7 @@ export async function mediaRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const userId = getUserId(req);
       const mediaId = (req.params as any).mediaId as string;
-      const access = await assertMediaAccess(userId, mediaId, "project:edit_assets");
+      const access = await assertMediaAccess(userId, mediaId, "media:manage");
       if (!access) return reply.code(404).send({ error: "not_found" });
 
       const input = PresignVideoSchema.parse(req.body);
@@ -735,7 +857,7 @@ export async function mediaRoutes(app: FastifyInstance) {
   app.put("/media/:mediaId/upload/file", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const mediaId = (req.params as any).mediaId as string;
-    const access = await assertMediaAccess(userId, mediaId, "project:edit_assets");
+    const access = await assertMediaAccess(userId, mediaId, "media:manage");
     if (!access) return reply.code(404).send({ error: "not_found" });
 
     const objectKey = String((req.query as any).objectKey ?? "");
@@ -743,12 +865,11 @@ export async function mediaRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "invalid_object_key" });
     }
 
-    await putObjectStream({
+    await putRequestBodyObject({
+      req,
       bucket: env.S3_BUCKET_ORIGINAL,
       objectKey,
-      body: req.raw,
-      contentType: req.headers["content-type"] ?? undefined,
-      contentLength: req.headers["content-length"] ? Number(req.headers["content-length"]) : undefined
+      contentType: req.headers["content-type"] ?? undefined
     });
 
     return reply.send({ ok: true, objectKey });
@@ -757,7 +878,7 @@ export async function mediaRoutes(app: FastifyInstance) {
   app.post("/media/:mediaId/process", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const mediaId = (req.params as any).mediaId as string;
-    const access = await assertMediaAccess(userId, mediaId, "project:edit_assets");
+    const access = await assertMediaAccess(userId, mediaId, "media:manage");
     if (!access) return reply.code(404).send({ error: "not_found" });
 
     const input = EnqueueSchema.parse(req.body);
@@ -844,3 +965,4 @@ export async function mediaRoutes(app: FastifyInstance) {
     return reply.send({ ok: true, queued: true, metadata });
   });
 }
+

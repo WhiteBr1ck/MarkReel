@@ -1,5 +1,5 @@
 import type { Store, StoreProject, StoreUser, StoreUserProfile } from "./types";
-import { capabilitiesForRole, type ProjectRole } from "../access";
+import { capabilitiesForRole, getProjectAccess, type ProjectRole } from "../access";
 import { createRandomAvatarPreset } from "../avatarPresets";
 import { prisma } from "../db";
 
@@ -56,7 +56,7 @@ function toStoreUserProfile(user: StoreUser): StoreUserProfile {
 
 function withProjectAccess<T extends { id: string; ownerId: string; members?: Array<{ role: ProjectRole }> }>(project: T, userId: string): Omit<T, "members"> & StoreProject {
   const role = project.ownerId === userId ? "owner" : project.members?.[0]?.role ?? "viewer";
-  const accessSource = project.ownerId === userId ? "owner" : "member";
+  const accessSource = project.ownerId === userId ? "owner" : "legacy_member";
   const { members: _members, ...rest } = project;
   return {
     ...rest,
@@ -64,6 +64,37 @@ function withProjectAccess<T extends { id: string; ownerId: string; members?: Ar
     accessSource,
     capabilities: capabilitiesForRole(role)
   } as Omit<T, "members"> & StoreProject;
+}
+
+async function withResolvedProjectAccess<T extends { id: string; ownerId: string; members?: Array<{ role: ProjectRole }> }>(project: T, userId: string): Promise<Omit<T, "members"> & StoreProject> {
+  const { members: _members, ...rest } = project;
+  const access = await getProjectAccess({ userId, projectId: project.id });
+  if (!access) return withProjectAccess(project, userId);
+  return {
+    ...rest,
+    role: access.role,
+    accessSource: access.accessSource,
+    capabilities: access.capabilities
+  } as Omit<T, "members"> & StoreProject;
+}
+
+async function defaultOrganizationForUser(userId: string) {
+  const membership = await prisma.organizationMember.findFirst({
+    where: { userId, organization: { deletedAt: null } },
+    orderBy: { createdAt: "asc" },
+    select: { organizationId: true }
+  });
+  if (membership) return membership.organizationId;
+
+  const organization = await prisma.organization.create({
+    data: {
+      name: "Default Organization",
+      createdById: userId,
+      members: { create: { userId, role: "owner" } }
+    },
+    select: { id: true }
+  });
+  return organization.id;
 }
 
 export function createPrismaStore(): Store {
@@ -291,34 +322,45 @@ export function createPrismaStore(): Store {
       const rows = await prisma.project.findMany({
         where: {
           deletedAt: null,
-          OR: [{ ownerId: userId }, { members: { some: { userId } } }]
+          OR: [
+            { ownerId: userId },
+            { members: { some: { userId } } },
+            { permissionGrants: { some: { subjectType: "invited_user", subjectUserId: userId } } },
+            { organization: { members: { some: { userId } } }, permissionGrants: { some: { subjectType: "organization" } } }
+          ]
         },
         orderBy: { updatedAt: "desc" },
         select: {
           id: true,
           name: true,
           ownerId: true,
+          organizationId: true,
           createdAt: true,
           updatedAt: true,
           members: { where: { userId }, select: { role: true }, take: 1 }
         }
       });
-      return rows.map((row) => withProjectAccess(row, userId));
+      return Promise.all(rows.map((row) => withResolvedProjectAccess(row, userId)));
     },
 
-    async projectCreate({ userId, name }) {
+    async projectCreate({ userId, name, organizationId }) {
+      const effectiveOrganizationId = organizationId ?? await defaultOrganizationForUser(userId);
       const project = await prisma.project.create({
         data: {
           name,
           ownerId: userId,
+          organizationId: effectiveOrganizationId,
           members: {
             create: {
               userId,
               role: "owner"
             }
+          },
+          permissionGrants: {
+            create: ["manage", "upload", "view"].map((permission) => ({ subjectType: "creator", subjectKey: "", permission: permission as any }))
           }
         },
-        select: { id: true, name: true, ownerId: true, createdAt: true, updatedAt: true }
+        select: { id: true, name: true, ownerId: true, organizationId: true, createdAt: true, updatedAt: true }
       });
       return project;
     },
@@ -328,18 +370,24 @@ export function createPrismaStore(): Store {
         where: {
           id: projectId,
           deletedAt: null,
-          OR: [{ ownerId: userId }, { members: { some: { userId } } }]
+          OR: [
+            { ownerId: userId },
+            { members: { some: { userId } } },
+            { permissionGrants: { some: { subjectType: "invited_user", subjectUserId: userId } } },
+            { organization: { members: { some: { userId } } }, permissionGrants: { some: { subjectType: "organization" } } }
+          ]
         },
         select: {
           id: true,
           name: true,
           ownerId: true,
+          organizationId: true,
           createdAt: true,
           updatedAt: true,
           members: { where: { userId }, select: { role: true }, take: 1 }
         }
       });
-      return project ? withProjectAccess(project, userId) : null;
+      return project ? withResolvedProjectAccess(project, userId) : null;
     },
 
     async projectRenameForUser({ userId, projectId, name }) {

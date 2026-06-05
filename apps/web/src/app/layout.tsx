@@ -7,7 +7,11 @@ const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono" });
 
 export const metadata = {
   title: "MarkReel",
-  description: "开源自托管的视频审阅与标注工具"
+  description: "开源自托管的视频审阅与标注工具",
+  icons: {
+    icon: "/logo.png",
+    apple: "/logo.png"
+  }
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

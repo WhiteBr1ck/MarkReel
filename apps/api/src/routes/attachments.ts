@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { nanoid } from "nanoid";
 import { env } from "../env";
-import { putObjectStream } from "../s3";
+import { putRequestBodyObject } from "../uploadProxy";
 import { getUserId, requireUser } from "../auth/requireUser";
 import { auditLog } from "../audit";
 
@@ -48,12 +48,11 @@ export async function attachmentRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "invalid_object_key" });
     }
 
-    await putObjectStream({
+    await putRequestBodyObject({
+      req,
       bucket: env.S3_BUCKET_ATTACHMENTS,
       objectKey,
-      body: req.raw,
-      contentType: req.headers["content-type"] ?? undefined,
-      contentLength: req.headers["content-length"] ? Number(req.headers["content-length"]) : undefined
+      contentType: req.headers["content-type"] ?? undefined
     });
 
     return reply.send({ ok: true, objectKey });

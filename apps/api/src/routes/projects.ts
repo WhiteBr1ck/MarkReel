@@ -7,7 +7,8 @@ import { prisma } from "../db";
 import { getProjectAccess, hasCapability } from "../access";
 
 const CreateProjectSchema = z.object({
-  name: z.string().min(1).max(120)
+  name: z.string().min(1).max(120),
+  organizationId: z.string().optional().nullable()
 });
 
 const UpdateProjectSchema = z.object({
@@ -80,7 +81,7 @@ export async function projectRoutes(app: FastifyInstance) {
     const input = CreateProjectSchema.parse(req.body);
 
     const store = getStore();
-    const project = await store.projectCreate({ userId, name: input.name });
+    const project = await store.projectCreate({ userId, name: input.name, organizationId: input.organizationId ?? null });
 
     await auditLog({
       req,

@@ -16,7 +16,7 @@ process.env.S3_BUCKET_ORIGINAL = "original";
 process.env.S3_BUCKET_DERIVED = "derived";
 process.env.S3_BUCKET_ATTACHMENTS = "attachments";
 process.env.MARKREEL_ADMIN_USERNAME = "admin";
-process.env.MARKREEL_ADMIN_PASSWORD = "adminpass123";
+process.env.MARKREEL_ADMIN_PASSWORD = "adminadmin";
 
 const appModule = import("../main");
 
@@ -95,6 +95,30 @@ test("change password invalidates old session", async () => {
   }
 });
 
+test("refresh survives an expired access token response", async () => {
+  const app = await createApp();
+  try {
+    const registered = await app.inject({ method: "POST", url: "/api/auth/register", payload: { username: "chris", password: "password123" } });
+    assert.equal(registered.statusCode, 200);
+
+    const cookies = registered.cookies;
+    const refreshCookie = cookies.find((cookie) => cookie.name === "mr_refresh");
+    assert.ok(refreshCookie);
+    const invalidAccessCookies = `mr_access=not-a-valid-token; mr_refresh=${refreshCookie.value}`;
+
+    const expired = await app.inject({ method: "GET", url: "/api/me", headers: { cookie: invalidAccessCookies } });
+    assert.equal(expired.statusCode, 401);
+    assert.ok(!expired.cookies.some((cookie) => cookie.name === "mr_refresh" && cookie.value === ""));
+
+    const refreshed = await app.inject({ method: "POST", url: "/api/auth/refresh", headers: { cookie: invalidAccessCookies } });
+    assert.equal(refreshed.statusCode, 200);
+    assert.equal(refreshed.json().ok, true);
+    assert.ok(refreshed.cookies.some((cookie) => cookie.name === "mr_access"));
+  } finally {
+    await app.close();
+  }
+});
+
 test("deleted user cannot log in", async () => {
   const app = await createApp();
   try {
@@ -130,7 +154,7 @@ test("non-admin cannot access admin users", async () => {
 test("admin resets password and old user session is rejected", async () => {
   const app = await createApp();
   try {
-    const admin = await app.inject({ method: "POST", url: "/api/auth/login", payload: { username: "admin", password: "adminpass123" } });
+    const admin = await app.inject({ method: "POST", url: "/api/auth/login", payload: { username: "admin", password: "adminadmin" } });
     assert.equal(admin.statusCode, 200);
     const adminCookies = cookieHeader(admin);
 

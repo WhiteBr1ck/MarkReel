@@ -14,6 +14,31 @@ enum ProjectRole {
   viewer
 }
 
+enum OrganizationRole {
+  owner
+  admin
+  member
+}
+
+enum PermissionSubjectType {
+  creator
+  organization
+  invited_user
+  public
+}
+
+enum ProjectPermission {
+  manage
+  upload
+  view
+}
+
+enum MediaPermission {
+  manage
+  annotate
+  view
+}
+
 enum UserGlobalRole {
   admin
   user
@@ -76,29 +101,77 @@ model User {
   deletedAt         DateTime?
 
   memberships          ProjectMember[]
+  organizationMemberships OrganizationMember[]
   projects             Project[]        @relation("ProjectOwner")
+  createdOrganizations Organization[]   @relation("OrganizationCreator")
+  createdMedia         Media[]          @relation("MediaCreator")
   annotations          Annotation[]     @relation("AnnotationAuthor")
   completedAnnotations Annotation[]     @relation("AnnotationCompleter")
   mediaRatings         MediaRating[]
   auditLogs            AuditLog[]
   shareLinks           ShareLink[]
+  projectPermissionGrants ProjectPermissionGrant[]
+  mediaPermissionGrants   MediaPermissionGrant[]
+}
+
+model Organization {
+  id          String   @id @default(cuid())
+  name        String
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+
+  createdBy User                 @relation("OrganizationCreator", fields: [createdById], references: [id])
+  members   OrganizationMember[]
+  projects  Project[]
+}
+
+model OrganizationMember {
+  organizationId String
+  userId         String
+  role           OrganizationRole @default(member)
+  createdAt      DateTime         @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@id([organizationId, userId])
 }
 
 model Project {
   id        String   @id @default(cuid())
   name      String
   ownerId   String
+  organizationId String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   deletedAt DateTime?
 
   owner       User            @relation("ProjectOwner", fields: [ownerId], references: [id])
+  organization Organization?  @relation(fields: [organizationId], references: [id])
   members     ProjectMember[]
+  permissionGrants ProjectPermissionGrant[]
   folders     ProjectFolder[]
   media       Media[]
   shareLinks  ShareLink[]
   series      MediaSeries[]
   annotations Annotation[]
+}
+
+model ProjectPermissionGrant {
+  id             String                @id @default(cuid())
+  projectId      String
+  subjectType    PermissionSubjectType
+  subjectKey     String                @default("")
+  subjectUserId  String?
+  permission     ProjectPermission
+  createdAt      DateTime              @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  subjectUser User? @relation(fields: [subjectUserId], references: [id])
+
+  @@unique([projectId, subjectType, subjectKey, permission])
 }
 
 model ProjectFolder {
@@ -142,6 +215,7 @@ model ProjectMember {
 model Media {
   id           String                @id @default(cuid())
   projectId    String
+  creatorId    String?
   folderId     String?
   title        String
   seriesId     String?
@@ -153,12 +227,29 @@ model Media {
   deletedAt    DateTime?
 
   project     Project        @relation(fields: [projectId], references: [id])
+  creator     User?          @relation("MediaCreator", fields: [creatorId], references: [id])
   folder      ProjectFolder? @relation(fields: [folderId], references: [id])
   series      MediaSeries?   @relation(fields: [seriesId], references: [id])
   files       MediaFile[]
   annotations Annotation[]
   ratings     MediaRating[]
   shareLinks  ShareLink[]
+  permissionGrants MediaPermissionGrant[]
+}
+
+model MediaPermissionGrant {
+  id             String                @id @default(cuid())
+  mediaId        String
+  subjectType    PermissionSubjectType
+  subjectKey     String                @default("")
+  subjectUserId  String?
+  permission     MediaPermission
+  createdAt      DateTime              @default(now())
+
+  media Media @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  subjectUser User? @relation(fields: [subjectUserId], references: [id])
+
+  @@unique([mediaId, subjectType, subjectKey, permission])
 }
 
 model MediaFile {

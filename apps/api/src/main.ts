@@ -9,9 +9,11 @@ import { authRoutes } from "./routes/auth";
 import { projectRoutes } from "./routes/projects";
 import { ensureStorageBuckets } from "./s3";
 import { getStore } from "./store";
-import { hashPassword } from "./auth/password";
+import { hashPassword, verifyPassword } from "./auth/password";
 import { userRoutes } from "./routes/users";
 import { adminRoutes } from "./routes/admin";
+import { organizationRoutes } from "./routes/organizations";
+import { prisma } from "./db";
 
 function isStorageUnavailableError(err: unknown) {
   const error = err as {
@@ -34,12 +36,65 @@ function isStorageUnavailableError(err: unknown) {
 
 async function ensureAdminUser() {
   if (!env.MARKREEL_ADMIN_USERNAME || !env.MARKREEL_ADMIN_PASSWORD) return;
+
+  const store = getStore();
+  const existing = await store.userFindByUsername(env.MARKREEL_ADMIN_USERNAME);
+  if (existing) {
+    const passwordMatches = await verifyPassword(env.MARKREEL_ADMIN_PASSWORD, existing.passwordHash);
+    const admin = await store.userEnsureAdmin({
+      username: env.MARKREEL_ADMIN_USERNAME,
+      passwordHash: existing.passwordHash,
+      displayName: env.MARKREEL_ADMIN_DISPLAY_NAME ?? null
+    });
+    if (!passwordMatches) {
+      await store.adminResetUserPassword({
+        userId: admin.id,
+        passwordHash: await hashPassword(env.MARKREEL_ADMIN_PASSWORD),
+        nextSessionVersion: admin.sessionVersion + 1
+      });
+    }
+    return;
+  }
+
   const passwordHash = await hashPassword(env.MARKREEL_ADMIN_PASSWORD);
-  await getStore().userEnsureAdmin({
+  await store.userEnsureAdmin({
     username: env.MARKREEL_ADMIN_USERNAME,
     passwordHash,
     displayName: env.MARKREEL_ADMIN_DISPLAY_NAME ?? null
   });
+}
+
+async function ensureDefaultOrganization() {
+  if (env.MARKREEL_STORE === "inmemory") return;
+  const existing = await prisma.organization.findFirst({ where: { deletedAt: null }, orderBy: { createdAt: "asc" } });
+  const admin = env.MARKREEL_ADMIN_USERNAME
+    ? await getStore().userFindByUsername(env.MARKREEL_ADMIN_USERNAME)
+    : null;
+  const fallbackUser = admin ?? await prisma.user.findFirst({ where: { deletedAt: null }, orderBy: { createdAt: "asc" } });
+  if (!fallbackUser) return;
+
+  const organization = existing ?? await prisma.organization.create({
+    data: {
+      name: "Default Organization",
+      createdById: fallbackUser.id,
+      members: { create: { userId: fallbackUser.id, role: "owner" } }
+    }
+  });
+
+  await prisma.organizationMember.upsert({
+    where: { organizationId_userId: { organizationId: organization.id, userId: fallbackUser.id } },
+    update: {},
+    create: { organizationId: organization.id, userId: fallbackUser.id, role: "owner" }
+  });
+  const users = await prisma.user.findMany({ where: { deletedAt: null }, select: { id: true } });
+  await Promise.all(users
+    .filter((user) => user.id !== fallbackUser.id)
+    .map((user) => prisma.organizationMember.upsert({
+      where: { organizationId_userId: { organizationId: organization.id, userId: user.id } },
+      update: {},
+      create: { organizationId: organization.id, userId: user.id, role: "member" }
+    })));
+  await prisma.project.updateMany({ where: { organizationId: null }, data: { organizationId: organization.id } });
 }
 
 export async function buildApp() {
@@ -61,6 +116,11 @@ export async function buildApp() {
     if (isStorageUnavailableError(err)) {
       reply.log.warn(err, "Object storage unavailable");
       return reply.code(503).send({ error: "object_storage_unavailable" });
+    }
+
+    if ((err as any)?.code === "upload_aborted") {
+      reply.log.warn(err, "Upload aborted before object storage write completed");
+      return reply.code(499).send({ error: "upload_aborted" });
     }
 
     const statusCode = (err as any)?.statusCode;
@@ -103,6 +163,7 @@ export async function buildApp() {
   }
 
   await ensureAdminUser();
+  await ensureDefaultOrganization();
 
   app.get("/health", async () => ({ ok: true }));
   app.get("/", async () => ({ name: "MarkReel API", status: "ok" }));
@@ -112,6 +173,7 @@ export async function buildApp() {
       await authRoutes(apiScope);
       await userRoutes(apiScope);
       await adminRoutes(apiScope);
+      await organizationRoutes(apiScope);
       await projectRoutes(apiScope);
 
       if (env.MARKREEL_STORE !== "inmemory") {

@@ -80,22 +80,51 @@ type MediaStatusResponse = {
 
 type ProjectMemberRole = "owner" | "editor" | "commenter" | "viewer";
 
-type ProjectMember = {
-  userId: string;
-  username: string;
-  displayName: string | null;
-  avatarPreset?: string | null;
-  role: ProjectMemberRole;
-  createdAt: string;
+type ProjectPermission = "manage" | "upload" | "view";
+type ProjectPermissionGrant = {
+  id?: string;
+  subjectType: "creator" | "organization" | "invited_user";
+  subjectUserId: string | null;
+  permission: ProjectPermission;
+  locked?: boolean;
+  user?: { id: string; username: string; displayName: string | null; avatarPreset?: string | null } | null;
+};
+type ProjectPermissionsResponse = {
+  project: { id: string; ownerId: string; organizationId: string | null };
+  grants: ProjectPermissionGrant[];
+};
+type OrganizationMember = { userId: string; username: string; displayName: string | null; avatarPreset?: string | null; role: "owner" | "admin" | "member"; createdAt: string };
+type OrganizationMembersResponse = { members: OrganizationMember[] };
+
+type MediaPermission = "manage" | "annotate" | "view";
+type MediaPermissionGrant = {
+  id?: string;
+  subjectType: "creator" | "organization" | "invited_user" | "public";
+  subjectUserId: string | null;
+  permission: MediaPermission;
+  locked?: boolean;
+  user?: { id: string; username: string; displayName: string | null; avatarPreset?: string | null } | null;
+};
+type MediaPermissionsResponse = {
+  media: { id: string; projectId: string; creatorId: string | null; organizationId: string | null };
+  grants: MediaPermissionGrant[];
 };
 
-type ProjectMembersResponse = { members: ProjectMember[] };
-type ProjectMemberResponse = { member: ProjectMember };
+type PermissionSubject = "organization" | "invited_user" | "public";
+type InviteDialogTarget = "project" | "media";
+type InviteDraft = { target: InviteDialogTarget; userIds: string[]; query: string };
+type ShareExpiry = "1d" | "3d" | "7d" | "30d" | "never";
 
-const PROJECT_MEMBER_ROLE_OPTIONS: Array<{ value: Exclude<ProjectMemberRole, "owner">; label: string; description: string }> = [
-  { value: "editor", label: "编辑者", description: "可上传、整理素材并参与标注。" },
-  { value: "commenter", label: "评论者", description: "可查看、评论和画面标注。" },
-  { value: "viewer", label: "只读者", description: "只能查看项目内容。" }
+const PROJECT_PERMISSION_OPTIONS: Array<{ value: ProjectPermission; label: string; description: string }> = [
+  { value: "manage", label: "管理", description: "管理项目资料、成员、权限和删除。" },
+  { value: "upload", label: "上传", description: "上传素材、整理文件夹并参与标注。" },
+  { value: "view", label: "查看", description: "查看项目内容和视频。" }
+];
+
+const MEDIA_PERMISSION_OPTIONS: Array<{ value: MediaPermission; label: string; description: string }> = [
+  { value: "manage", label: "管理", description: "修改视频资料、权限、分享链接、删除和恢复。" },
+  { value: "annotate", label: "标注", description: "查看视频并创建标注、回复和附件。" },
+  { value: "view", label: "查看", description: "只查看视频和已有标注。" }
 ];
 
 function roleLabel(role?: ProjectMemberRole) {
@@ -112,7 +141,7 @@ function canProject(project: Project | null | undefined, capability: string) {
   return !!project?.capabilities?.includes(capability);
 }
 
-type SharePermission = "view" | "comment" | "annotate";
+type SharePermission = "view" | "annotate";
 type ShareAudience = "anyone" | "authenticated";
 
 type ProjectShareLink = {
@@ -138,9 +167,60 @@ type ShareLinkResponse = { shareLink: ProjectShareLink };
 
 const SHARE_PERMISSION_OPTIONS: Array<{ value: SharePermission; label: string }> = [
   { value: "view", label: "查看" },
-  { value: "comment", label: "评论" },
   { value: "annotate", label: "标注" }
 ];
+
+const SHARE_EXPIRY_OPTIONS: Array<{ value: ShareExpiry; label: string; days: number | null }> = [
+  { value: "1d", label: "1天", days: 1 },
+  { value: "3d", label: "3天", days: 3 },
+  { value: "7d", label: "7天", days: 7 },
+  { value: "30d", label: "30天", days: 30 },
+  { value: "never", label: "永久", days: null }
+];
+
+const PROJECT_PERMISSION_RANK: Record<ProjectPermission, number> = { view: 1, upload: 2, manage: 3 };
+const MEDIA_PERMISSION_RANK: Record<MediaPermission, number> = { view: 1, annotate: 2, manage: 3 };
+
+function strongestPermission<T extends string>(permissions: T[], rank: Record<T, number>) {
+  return permissions.reduce<T | null>((best, permission) => (!best || rank[permission] > rank[best] ? permission : best), null);
+}
+
+function memberLabel(member: Pick<OrganizationMember, "username" | "displayName">) {
+  return member.displayName?.trim() || member.username;
+}
+
+function normalizePermissionGrants<TPermission extends string, TGrant extends { subjectType: string; subjectUserId: string | null; permission: TPermission }>(
+  grants: TGrant[],
+  rank: Record<TPermission, number>
+) {
+  const best = new Map<string, TGrant>();
+  for (const grant of grants) {
+    const key = `${grant.subjectType}:${grant.subjectUserId ?? ""}`;
+    const current = best.get(key);
+    if (!current || rank[grant.permission] > rank[current.permission]) {
+      best.set(key, grant);
+    }
+  }
+  return [...best.values()];
+}
+
+function nextProjectPermission(current: ProjectPermission | null, clicked: ProjectPermission) {
+  if (current === clicked) return clicked === "view" ? null : "view";
+  return clicked;
+}
+
+function nextMediaPermission(current: MediaPermission | null, clicked: MediaPermission) {
+  if (current === clicked) return clicked === "view" ? null : "view";
+  return clicked;
+}
+
+function expiryToIso(value: ShareExpiry) {
+  const option = SHARE_EXPIRY_OPTIONS.find((item) => item.value === value);
+  if (!option?.days) return null;
+  const date = new Date();
+  date.setDate(date.getDate() + option.days);
+  return date.toISOString();
+}
 
 type UploadMode = "original" | "compress";
 type UploadResolution = "1080p" | "720p";
@@ -365,9 +445,15 @@ function formatUploadError(e: any) {
   if (typeof e?.message === "string" && e.message.startsWith("upload_failed:")) {
     const detail = e.message.slice("upload_failed:".length);
     if (detail === "network") {
-      message = "上传文件失败：浏览器无法直连对象存储，请确认 MinIO 正在运行且已允许 http://localhost:5090 跨域上传";
+      message = "上传文件失败：网络连接中断，请重试";
+    } else if (detail === "499") {
+      message = "上传文件失败：连接提前中断，请重新上传";
+    } else if (detail === "500") {
+      message = "上传文件失败：API 上传代理异常，请查看 API 日志";
+    } else if (detail === "503") {
+      message = "上传文件失败：对象存储不可用，请确认 MinIO 正在运行";
     } else {
-      message = `上传文件失败：对象存储返回 ${detail}`;
+      message = `上传文件失败：服务返回 ${detail}`;
     }
   }
   return message;
@@ -486,18 +572,23 @@ export default function AppClient() {
   const [dragProjectId, setDragProjectId] = useState<string | null>(null);
   const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
   const [collaborationOpen, setCollaborationOpen] = useState(false);
-  const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
-  const [memberUsername, setMemberUsername] = useState("");
-  const [memberRole, setMemberRole] = useState<Exclude<ProjectMemberRole, "owner">>("commenter");
   const [membersLoading, setMembersLoading] = useState(false);
-  const [collaborationTab, setCollaborationTab] = useState<"members" | "links">("members");
+  const [projectPermissionGrants, setProjectPermissionGrants] = useState<ProjectPermissionGrant[]>([]);
+  const [organizationMembers, setOrganizationMembers] = useState<OrganizationMember[]>([]);
+  const [mediaPermissionsTarget, setMediaPermissionsTarget] = useState<Extract<WorkspaceItem, { kind: "video" }> | null>(null);
+  const [mediaPermissionGrants, setMediaPermissionGrants] = useState<MediaPermissionGrant[]>([]);
+  const [mediaPermissionMembers, setMediaPermissionMembers] = useState<OrganizationMember[]>([]);
+  const [mediaPermissionMeta, setMediaPermissionMeta] = useState<MediaPermissionsResponse["media"] | null>(null);
+  const [mediaPermissionsLoading, setMediaPermissionsLoading] = useState(false);
+  const [mediaPermissionsSaving, setMediaPermissionsSaving] = useState(false);
+  const [inviteDraft, setInviteDraft] = useState<InviteDraft | null>(null);
+  const [shareLinksTarget, setShareLinksTarget] = useState<Extract<WorkspaceItem, { kind: "video" }> | null>(null);
   const [shareLinks, setShareLinks] = useState<ProjectShareLink[]>([]);
   const [shareLinksLoading, setShareLinksLoading] = useState(false);
   const [shareLabel, setShareLabel] = useState("");
   const [shareAudience, setShareAudience] = useState<ShareAudience>("anyone");
-  const [sharePassword, setSharePassword] = useState("");
-  const [shareExpiresAt, setShareExpiresAt] = useState("");
-  const [sharePermissions, setSharePermissions] = useState<SharePermission[]>(["view", "comment", "annotate"]);
+  const [shareExpiry, setShareExpiry] = useState<ShareExpiry>("7d");
+  const [sharePermissions, setSharePermissions] = useState<SharePermission[]>(["view"]);
 
   const canSubmit = useMemo(() => {
     if (mode === "login") {
@@ -598,7 +689,51 @@ export default function AppClient() {
       setUser(r.user);
       setErr(null);
     } catch {
-      setUser(null);
+      resetAuthenticatedState();
+    }
+  }
+
+  function resetAuthenticatedState() {
+    setUser(null);
+    setWorkspaces([]);
+    setActiveWorkspaceId(null);
+    setWorkspace(null);
+    setDialog(null);
+    setUploadDraft(null);
+    setUploads([]);
+    setPreviewUrls({});
+    setPreviewBusy(false);
+    setFeedback(null);
+    setContextMenu(null);
+    setSortMenuOpen(false);
+    setTrashItems([]);
+    setProjectOrder([]);
+    setDragProjectId(null);
+    setDragOverProjectId(null);
+    setCollaborationOpen(false);
+    setMembersLoading(false);
+    setProjectPermissionGrants([]);
+    setOrganizationMembers([]);
+    setMediaPermissionsTarget(null);
+    setMediaPermissionGrants([]);
+    setMediaPermissionMembers([]);
+    setMediaPermissionMeta(null);
+    setMediaPermissionsLoading(false);
+    setMediaPermissionsSaving(false);
+    setInviteDraft(null);
+    setShareLinksTarget(null);
+    setShareLinks([]);
+    setShareLinksLoading(false);
+    setShareLabel("");
+    setShareAudience("anyone");
+    setShareExpiry("7d");
+    setSharePermissions(["view"]);
+    setBusy(false);
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem("mr_last_workbench_url");
+    }
+    if (pathname !== "/app" || sp.toString()) {
+      router.replace("/app");
     }
   }
 
@@ -682,8 +817,14 @@ export default function AppClient() {
   async function loadProjectMembers(projectId: string) {
     setMembersLoading(true);
     try {
-      const result = await api<ProjectMembersResponse>(`/projects/${projectId}/members`);
-      setProjectMembers(result.members);
+      const result = await api<ProjectPermissionsResponse>(`/projects/${projectId}/permissions`);
+      setProjectPermissionGrants(result.grants);
+      if (result.project.organizationId) {
+        const members = await api<OrganizationMembersResponse>(`/organizations/${result.project.organizationId}/members`);
+        setOrganizationMembers(members.members);
+      } else {
+        setOrganizationMembers([]);
+      }
     } catch (e: any) {
       showFeedback("error", toZhError(e));
     } finally {
@@ -694,26 +835,40 @@ export default function AppClient() {
   function openCollaborationDialog(project: Project | null) {
     if (!project) return;
     setCollaborationOpen(true);
-    setCollaborationTab("members");
-    setMemberUsername("");
-    setMemberRole("commenter");
-    resetShareDraft();
+    setProjectPermissionGrants([]);
+    setOrganizationMembers([]);
     void loadProjectMembers(project.id);
-    void loadProjectShareLinks(project.id);
   }
 
-  async function addProjectMember() {
+  function getProjectSubjectPermission(subjectType: "organization" | "invited_user", subjectUserId: string | null = null) {
+    return strongestPermission(
+      projectPermissionGrants
+        .filter((grant) => grant.subjectType === subjectType && (subjectType === "organization" || grant.subjectUserId === subjectUserId))
+        .map((grant) => grant.permission),
+      PROJECT_PERMISSION_RANK
+    );
+  }
+
+  function setProjectSubjectPermission(permission: ProjectPermission | null, subjectType: "organization" | "invited_user", subjectUserId: string | null = null) {
+    setProjectPermissionGrants((current) => {
+      const next = current.filter((grant) => !(grant.subjectType === subjectType && (subjectType === "organization" || grant.subjectUserId === subjectUserId)));
+      if (!permission) return next;
+      return [...next, { subjectType, subjectUserId: subjectType === "invited_user" ? subjectUserId : null, permission }];
+    });
+  }
+
+  async function saveProjectPermissions({ close = false } = {}) {
     const project = getCurrentProject();
-    if (!project || !memberUsername.trim()) return;
+    if (!project) return;
     setBusy(true);
     try {
-      const result = await api<ProjectMemberResponse>(`/projects/${project.id}/members`, {
-        method: "POST",
-        body: JSON.stringify({ username: memberUsername.trim(), role: memberRole })
-      });
-      setProjectMembers((members) => [result.member, ...members.filter((member) => member.userId !== result.member.userId)]);
-      setMemberUsername("");
-      showFeedback("success", "协作成员已更新");
+      const grants = projectPermissionGrants
+        .filter((grant) => grant.subjectType !== "creator")
+        .map((grant) => ({ subjectType: grant.subjectType, subjectUserId: grant.subjectUserId, permission: grant.permission }));
+      await api<{ ok: true }>(`/projects/${project.id}/permissions`, { method: "PUT", body: JSON.stringify({ grants: normalizePermissionGrants(grants, PROJECT_PERMISSION_RANK) }) });
+      await loadProjectMembers(project.id);
+      showFeedback("success", "项目权限已保存");
+      if (close) setCollaborationOpen(false);
     } catch (e: any) {
       showFeedback("error", toZhError(e));
     } finally {
@@ -721,43 +876,71 @@ export default function AppClient() {
     }
   }
 
-  async function updateProjectMemberRole(member: ProjectMember, role: Exclude<ProjectMemberRole, "owner">) {
-    const project = getCurrentProject();
-    if (!project || member.role === "owner") return;
-    setBusy(true);
+  async function loadMediaPermissions(item: Extract<WorkspaceItem, { kind: "video" }>) {
+    setMediaPermissionsLoading(true);
     try {
-      const result = await api<ProjectMemberResponse>(`/projects/${project.id}/members/${member.userId}`, {
-        method: "PATCH",
-        body: JSON.stringify({ role })
-      });
-      setProjectMembers((members) => members.map((item) => (item.userId === member.userId ? result.member : item)));
-      showFeedback("success", "成员权限已更新");
+      const result = await api<MediaPermissionsResponse>(`/media/${item.id}/permissions`);
+      setMediaPermissionMeta(result.media);
+      setMediaPermissionGrants(result.grants);
+      if (result.media.organizationId) {
+        const members = await api<OrganizationMembersResponse>(`/organizations/${result.media.organizationId}/members`);
+        setMediaPermissionMembers(members.members);
+      } else {
+        setMediaPermissionMembers([]);
+      }
     } catch (e: any) {
       showFeedback("error", toZhError(e));
     } finally {
-      setBusy(false);
+      setMediaPermissionsLoading(false);
     }
   }
 
-  async function removeProjectMember(member: ProjectMember) {
-    const project = getCurrentProject();
-    if (!project || member.role === "owner") return;
-    setBusy(true);
+  function openMediaPermissionsDialog(item: Extract<WorkspaceItem, { kind: "video" }>) {
+    setMediaPermissionsTarget(item);
+    setMediaPermissionMeta(null);
+    setMediaPermissionGrants([]);
+    setMediaPermissionMembers([]);
+    void loadMediaPermissions(item);
+  }
+
+  function getMediaSubjectPermission(subjectType: "organization" | "invited_user" | "public", subjectUserId: string | null = null) {
+    return strongestPermission(
+      mediaPermissionGrants
+        .filter((grant) => grant.subjectType === subjectType && (subjectType !== "invited_user" || grant.subjectUserId === subjectUserId))
+        .map((grant) => grant.permission),
+      MEDIA_PERMISSION_RANK
+    );
+  }
+
+  function setMediaSubjectPermission(permission: MediaPermission | null, subjectType: "organization" | "invited_user" | "public", subjectUserId: string | null = null) {
+    setMediaPermissionGrants((current) => {
+      const next = current.filter((grant) => !(grant.subjectType === subjectType && (subjectType !== "invited_user" || grant.subjectUserId === subjectUserId)));
+      if (!permission) return next;
+      return [...next, { subjectType, subjectUserId: subjectType === "invited_user" ? subjectUserId : null, permission }];
+    });
+  }
+
+  async function saveMediaPermissions() {
+    if (!mediaPermissionsTarget) return;
+    setMediaPermissionsSaving(true);
     try {
-      await api<{ ok: true }>(`/projects/${project.id}/members/${member.userId}`, { method: "DELETE" });
-      setProjectMembers((members) => members.filter((item) => item.userId !== member.userId));
-      showFeedback("success", "成员已移除");
+      const grants = mediaPermissionGrants
+        .filter((grant) => grant.subjectType !== "creator")
+        .map((grant) => ({ subjectType: grant.subjectType, subjectUserId: grant.subjectUserId, permission: grant.permission }));
+      await api<{ ok: true }>(`/media/${mediaPermissionsTarget.id}/permissions`, { method: "PUT", body: JSON.stringify({ grants: normalizePermissionGrants(grants, MEDIA_PERMISSION_RANK) }) });
+      await loadMediaPermissions(mediaPermissionsTarget);
+      showFeedback("success", "视频权限已保存");
     } catch (e: any) {
       showFeedback("error", toZhError(e));
     } finally {
-      setBusy(false);
+      setMediaPermissionsSaving(false);
     }
   }
 
-  async function loadProjectShareLinks(projectId: string) {
+  async function loadMediaShareLinks(mediaId: string) {
     setShareLinksLoading(true);
     try {
-      const result = await api<ShareLinksResponse>(`/projects/${projectId}/share-links`);
+      const result = await api<ShareLinksResponse>(`/media/${mediaId}/share-links`);
       setShareLinks(result.shareLinks);
     } catch (e: any) {
       showFeedback("error", toZhError(e));
@@ -769,9 +952,15 @@ export default function AppClient() {
   function resetShareDraft() {
     setShareLabel("");
     setShareAudience("anyone");
-    setSharePassword("");
-    setShareExpiresAt("");
-    setSharePermissions(["view", "comment", "annotate"]);
+    setShareExpiry("7d");
+    setSharePermissions(["view"]);
+  }
+
+  function openShareLinksDialog(item: Extract<WorkspaceItem, { kind: "video" }>) {
+    setShareLinksTarget(item);
+    setShareLinks([]);
+    resetShareDraft();
+    void loadMediaShareLinks(item.id);
   }
 
   function toggleSharePermission(permission: SharePermission) {
@@ -785,32 +974,26 @@ export default function AppClient() {
   }
 
   function buildShareUrl(link: ProjectShareLink) {
-    if (!link.url) return null;
-    return new URL(link.url, window.location.origin).toString();
+    const path = link.url || `/share/${link.id}`;
+    return new URL(path, window.location.origin).toString();
   }
 
   async function copyShareLink(link: ProjectShareLink) {
     const url = buildShareUrl(link);
-    if (!url) {
-      showFeedback("error", "这个链接的原始地址只会在创建时显示，请重新创建一个链接。");
-      return;
-    }
     await navigator.clipboard.writeText(url);
     showFeedback("success", "分享链接已复制");
   }
 
   async function createShareLink() {
-    const project = getCurrentProject();
-    if (!project) return;
+    if (!shareLinksTarget) return;
     setBusy(true);
     try {
-      const expiresAt = shareExpiresAt ? new Date(shareExpiresAt).toISOString() : null;
-      const result = await api<ShareLinkResponse>(`/projects/${project.id}/share-links`, {
+      const expiresAt = expiryToIso(shareExpiry);
+      const result = await api<ShareLinkResponse>(`/media/${shareLinksTarget.id}/share-links`, {
         method: "POST",
         body: JSON.stringify({
           label: shareLabel.trim() || null,
           audience: shareAudience,
-          password: sharePassword || null,
           expiresAt,
           permissions: sharePermissions
         })
@@ -828,15 +1011,11 @@ export default function AppClient() {
   }
 
   async function revokeShareLink(link: ProjectShareLink) {
-    const project = getCurrentProject();
-    if (!project) return;
+    if (!shareLinksTarget) return;
     setBusy(true);
     try {
-      const result = await api<ShareLinkResponse>(`/projects/${project.id}/share-links/${link.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ revoked: true })
-      });
-      setShareLinks((links) => links.map((item) => (item.id === link.id ? result.shareLink : item)));
+      await api<{ ok: true }>(`/media/${shareLinksTarget.id}/share-links/${link.id}`, { method: "DELETE" });
+      setShareLinks((links) => links.filter((item) => item.id !== link.id));
       showFeedback("success", "分享链接已撤销");
     } catch (e: any) {
       showFeedback("error", toZhError(e));
@@ -1072,9 +1251,11 @@ export default function AppClient() {
 
   async function onLogout() {
     setErr(null);
-    await api("/auth/logout", { method: "POST", body: "{}" });
-    setUser(null);
-    setWorkspaces([]);
+    try {
+      await api("/auth/logout", { method: "POST", body: "{}" });
+    } finally {
+      resetAuthenticatedState();
+    }
   }
 
   async function onCreateWorkspace(name: string) {
@@ -1476,7 +1657,7 @@ export default function AppClient() {
     }
   }
 
-  function handleContextMenuAction(action: "create_folder" | "rename" | "delete" | "open" | "download" | "restore" | "create_project") {
+  function handleContextMenuAction(action: "create_folder" | "rename" | "delete" | "open" | "download" | "restore" | "create_project" | "video_permissions" | "video_share_links") {
     const target = contextMenu?.target ?? null;
     setContextMenu(null);
 
@@ -1538,6 +1719,16 @@ export default function AppClient() {
 
     if (action === "download" && target.kind === "video") {
       void onDownloadItem(target);
+      return;
+    }
+
+    if (action === "video_permissions" && target.kind === "video") {
+      openMediaPermissionsDialog(target);
+      return;
+    }
+
+    if (action === "video_share_links" && target.kind === "video") {
+      openShareLinksDialog(target);
       return;
     }
 
@@ -1654,6 +1845,22 @@ export default function AppClient() {
   const currentProject = workspaces.find((project) => project.id === effectivePid) ?? workspace?.project ?? null;
   const canEditAssets = canProject(currentProject, "project:edit_assets");
   const canDeleteProject = canProject(currentProject, "project:delete");
+  const canManageProjectPermissions = canProject(currentProject, "project:manage_members");
+  const invitedOrganizationMembers = organizationMembers.filter((member) => member.userId !== currentProject?.ownerId);
+  const projectInvitedMembers = invitedOrganizationMembers.filter((member) => getProjectSubjectPermission("invited_user", member.userId));
+  const mediaInviteCandidates = mediaPermissionMembers.filter((member) => member.userId !== mediaPermissionMeta?.creatorId);
+  const mediaInvitedMembers = mediaInviteCandidates.filter((member) => getMediaSubjectPermission("invited_user", member.userId));
+  const activeInviteMembers = inviteDraft?.target === "project" ? invitedOrganizationMembers : mediaInviteCandidates;
+  const activeInviteSelected = activeInviteMembers.filter((member) => inviteDraft?.userIds.includes(member.userId));
+  const activeInviteQuery = inviteDraft?.query.trim().toLowerCase() ?? "";
+  const activeInviteOptions = activeInviteMembers
+    .filter((member) => {
+      const alreadyInvited = inviteDraft?.target === "project" ? getProjectSubjectPermission("invited_user", member.userId) : getMediaSubjectPermission("invited_user", member.userId);
+      if (alreadyInvited) return false;
+      if (!activeInviteQuery) return true;
+      return member.username.toLowerCase().includes(activeInviteQuery) || (member.displayName ?? "").toLowerCase().includes(activeInviteQuery);
+    })
+    .slice(0, 12);
   const renameState = getRenameTarget();
   const renameDisabled = !workspace || !selectionMode || !canEditAssets || "error" in renameState;
   const renameHint = renameDisabled ? (!canEditAssets ? "当前权限不能修改素材" : "error" in renameState ? renameState.error : "请先进入多选模式") : "重命名当前选中条目";
@@ -1811,152 +2018,393 @@ export default function AppClient() {
       <Dialog
         open={collaborationOpen}
         title="项目协作"
-        description={currentProject ? `管理“${currentProject.name}”的直接协作成员。` : undefined}
+        description={currentProject ? `管理“${currentProject.name}”的项目权限。分享链接只在视频菜单中设置。` : undefined}
+        size="wide"
         onClose={() => {
           if (busy) return;
           setCollaborationOpen(false);
         }}
         footer={
-          <button type="button" className="mr-btn mr-btn--primary" disabled={busy} onClick={() => setCollaborationOpen(false)}>
+          <button type="button" className="mr-btn mr-btn--primary" disabled={busy || membersLoading} onClick={() => canManageProjectPermissions ? void saveProjectPermissions({ close: true }) : setCollaborationOpen(false)}>
             完成
           </button>
         }
       >
         <div className="mr-dialog__stack">
-          <div className="mr-avatar-dialog__tabs" role="tablist" aria-label="协作设置">
-            <button type="button" className={`mr-avatar-dialog__tab${collaborationTab === "members" ? " is-active" : ""}`} onClick={() => setCollaborationTab("members")}>
-              成员
+          <div className="mr-permission-panel">
+            <div className="mr-permission-panel__head">
+              <div>
+                <strong>项目权限</strong>
+                <span>创建者默认拥有全部权限，不能移除。</span>
+              </div>
+              <button className="mr-btn mr-btn--primary" type="button" disabled={busy || membersLoading || !canManageProjectPermissions} onClick={() => void saveProjectPermissions()}>
+                {busy ? "保存中…" : "保存权限"}
+              </button>
+            </div>
+
+            {membersLoading ? <div className="mr-page__note">正在加载权限…</div> : null}
+            {!membersLoading ? (
+              <>
+                <div className="mr-permission-table mr-permission-table--project" role="table" aria-label="项目权限矩阵">
+                  <div className="mr-permission-table__row mr-permission-table__row--head" role="row">
+                    <div role="columnheader">权限</div>
+                    <div role="columnheader">创建者</div>
+                    <div role="columnheader">组织内</div>
+                  </div>
+                  {PROJECT_PERMISSION_OPTIONS.map((permission) => {
+                    const organizationPermission = getProjectSubjectPermission("organization");
+                    const included = organizationPermission ? PROJECT_PERMISSION_RANK[organizationPermission] > PROJECT_PERMISSION_RANK[permission.value] : false;
+                    const active = organizationPermission === permission.value;
+                    return (
+                      <div key={permission.value} className="mr-permission-table__row" role="row">
+                        <div className="mr-permission-table__scope" role="cell">
+                          <strong>{permission.label}</strong>
+                          <span>{permission.description}</span>
+                        </div>
+                        <div role="cell"><span className="mr-badge mr-badge--accent">锁定</span></div>
+                        <div role="cell">
+                          <button
+                            type="button"
+                            className={`mr-permission-toggle${active ? " is-active" : ""}${included ? " is-included" : ""}`}
+                            disabled={busy || !canManageProjectPermissions || !currentProject?.organizationId}
+                            onClick={() => setProjectSubjectPermission(nextProjectPermission(organizationPermission, permission.value), "organization")}
+                            aria-pressed={active || included}
+                          >
+                            {active ? "已允许" : included ? "已包含" : currentProject?.organizationId ? "未允许" : "无组织"}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="mr-permission-invite-card">
+                  <div>
+                    <strong>邀请用户</strong>
+                    <span>从当前组织成员中单独授权，不影响组织内默认权限。</span>
+                  </div>
+                  <button className="mr-btn" type="button" disabled={busy || !canManageProjectPermissions || invitedOrganizationMembers.length === 0} onClick={() => setInviteDraft({ target: "project", userIds: [], query: "" })}>
+                    添加邀请用户
+                  </button>
+                </div>
+                {projectInvitedMembers.length > 0 ? (
+                  <div className="mr-permission-invite-list">
+                    {projectInvitedMembers.map((member) => {
+                      const selectedPermission = getProjectSubjectPermission("invited_user", member.userId);
+                      return (
+                        <div className="mr-permission-invite-row" key={member.userId}>
+                          <div>
+                            <strong>{memberLabel(member)}</strong>
+                            <span>@{member.username}</span>
+                          </div>
+                          <div className="mr-permission-choice-group">
+                            {PROJECT_PERMISSION_OPTIONS.map((permission) => (
+                              <button
+                                key={permission.value}
+                                className={`mr-permission-choice${selectedPermission === permission.value ? " is-active" : ""}${selectedPermission && PROJECT_PERMISSION_RANK[selectedPermission] > PROJECT_PERMISSION_RANK[permission.value] ? " is-included" : ""}`}
+                                type="button"
+                                disabled={busy || !canManageProjectPermissions}
+                                onClick={() => setProjectSubjectPermission(nextProjectPermission(selectedPermission, permission.value), "invited_user", member.userId)}
+                              >
+                                {permission.label}
+                              </button>
+                            ))}
+                            <button className="mr-permission-choice mr-permission-choice--remove" type="button" disabled={busy || !canManageProjectPermissions} onClick={() => setProjectSubjectPermission(null, "invited_user", member.userId)}>
+                              移除
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="mr-permission-empty">还没有单独邀请的用户。</div>
+                )}
+              </>
+            ) : null}
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={!!mediaPermissionsTarget}
+        title="视频权限"
+        description={mediaPermissionsTarget ? `设置“${mediaPermissionsTarget.name}”的访问权限。` : undefined}
+        size="wide"
+        onClose={() => {
+          if (mediaPermissionsSaving) return;
+          setMediaPermissionsTarget(null);
+        }}
+        footer={
+          <>
+            <button type="button" className="mr-btn mr-btn--ghost" disabled={mediaPermissionsSaving} onClick={() => setMediaPermissionsTarget(null)}>
+              取消
             </button>
-            <button type="button" className={`mr-avatar-dialog__tab${collaborationTab === "links" ? " is-active" : ""}`} onClick={() => setCollaborationTab("links")}>
-              分享链接
+            <button className="mr-btn mr-btn--primary" type="button" disabled={mediaPermissionsSaving || mediaPermissionsLoading} onClick={() => void saveMediaPermissions()}>
+              {mediaPermissionsSaving ? "保存中…" : "保存权限"}
+            </button>
+          </>
+        }
+      >
+        <div className="mr-dialog__stack">
+          <div className="mr-permission-panel">
+            <div className="mr-permission-panel__head">
+              <div>
+                <strong>视频权限</strong>
+                <span>视频创建者默认拥有全部权限，不能移除。公开权限会允许未登录访问。</span>
+              </div>
+            </div>
+            {mediaPermissionsLoading ? <div className="mr-page__note">正在加载权限…</div> : null}
+            {!mediaPermissionsLoading ? (
+              <>
+                <div className="mr-permission-table mr-permission-table--media" role="table" aria-label="视频权限矩阵">
+                  <div className="mr-permission-table__row mr-permission-table__row--head" role="row">
+                    <div role="columnheader">权限</div>
+                    <div role="columnheader">创建者</div>
+                    <div role="columnheader">组织内</div>
+                    <div role="columnheader">公开</div>
+                  </div>
+                  {MEDIA_PERMISSION_OPTIONS.map((permission) => {
+                    const organizationPermission = getMediaSubjectPermission("organization");
+                    const publicPermission = getMediaSubjectPermission("public");
+                    const organizationIncluded = organizationPermission ? MEDIA_PERMISSION_RANK[organizationPermission] > MEDIA_PERMISSION_RANK[permission.value] : false;
+                    const publicIncluded = publicPermission ? MEDIA_PERMISSION_RANK[publicPermission] > MEDIA_PERMISSION_RANK[permission.value] : false;
+                    const organizationActive = organizationPermission === permission.value;
+                    const publicActive = publicPermission === permission.value;
+                    return (
+                      <div key={permission.value} className="mr-permission-table__row" role="row">
+                        <div className="mr-permission-table__scope" role="cell">
+                          <strong>{permission.label}</strong>
+                          <span>{permission.description}</span>
+                        </div>
+                        <div role="cell"><span className="mr-badge mr-badge--accent">锁定</span></div>
+                        <div role="cell">
+                          <button
+                            type="button"
+                            className={`mr-permission-toggle${organizationActive ? " is-active" : ""}${organizationIncluded ? " is-included" : ""}`}
+                            disabled={mediaPermissionsSaving || !mediaPermissionMeta?.organizationId}
+                            onClick={() => setMediaSubjectPermission(nextMediaPermission(organizationPermission, permission.value), "organization")}
+                            aria-pressed={organizationActive || organizationIncluded}
+                          >
+                            {organizationActive ? "已允许" : organizationIncluded ? "已包含" : mediaPermissionMeta?.organizationId ? "未允许" : "无组织"}
+                          </button>
+                        </div>
+                        <div role="cell">
+                          <button
+                            type="button"
+                            className={`mr-permission-toggle${publicActive ? " is-active" : ""}${publicIncluded ? " is-included" : ""}`}
+                            disabled={mediaPermissionsSaving}
+                            onClick={() => setMediaSubjectPermission(nextMediaPermission(publicPermission, permission.value), "public")}
+                            aria-pressed={publicActive || publicIncluded}
+                          >
+                            {publicActive ? "已允许" : publicIncluded ? "已包含" : "未允许"}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="mr-permission-invite-card">
+                  <div>
+                    <strong>邀请用户</strong>
+                    <span>给组织成员单独设置这个视频的权限。</span>
+                  </div>
+                  <button className="mr-btn" type="button" disabled={mediaPermissionsSaving || mediaInviteCandidates.length === 0} onClick={() => setInviteDraft({ target: "media", userIds: [], query: "" })}>
+                    添加邀请用户
+                  </button>
+                </div>
+                {mediaInvitedMembers.length > 0 ? (
+                  <div className="mr-permission-invite-list">
+                    {mediaInvitedMembers.map((member) => {
+                      const selectedPermission = getMediaSubjectPermission("invited_user", member.userId);
+                      return (
+                        <div className="mr-permission-invite-row" key={member.userId}>
+                          <div>
+                            <strong>{memberLabel(member)}</strong>
+                            <span>@{member.username}</span>
+                          </div>
+                          <div className="mr-permission-choice-group">
+                            {MEDIA_PERMISSION_OPTIONS.map((permission) => (
+                              <button
+                                key={permission.value}
+                                className={`mr-permission-choice${selectedPermission === permission.value ? " is-active" : ""}${selectedPermission && MEDIA_PERMISSION_RANK[selectedPermission] > MEDIA_PERMISSION_RANK[permission.value] ? " is-included" : ""}`}
+                                type="button"
+                                disabled={mediaPermissionsSaving}
+                                onClick={() => setMediaSubjectPermission(nextMediaPermission(selectedPermission, permission.value), "invited_user", member.userId)}
+                              >
+                                {permission.label}
+                              </button>
+                            ))}
+                            <button className="mr-permission-choice mr-permission-choice--remove" type="button" disabled={mediaPermissionsSaving} onClick={() => setMediaSubjectPermission(null, "invited_user", member.userId)}>
+                              移除
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="mr-permission-empty">还没有单独邀请的用户。</div>
+                )}
+              </>
+            ) : null}
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={!!inviteDraft}
+        title="添加邀请用户"
+        description="从当前组织成员中选择用户，添加后可在权限列表里调整级别。"
+        onClose={() => setInviteDraft(null)}
+        footer={
+          <>
+            <button type="button" className="mr-btn mr-btn--ghost" onClick={() => setInviteDraft(null)}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="mr-btn mr-btn--primary"
+              disabled={!inviteDraft?.userIds.length}
+              onClick={() => {
+                if (!inviteDraft?.userIds.length) return;
+                if (inviteDraft.target === "project") {
+                  for (const userId of inviteDraft.userIds) setProjectSubjectPermission("view", "invited_user", userId);
+                } else {
+                  for (const userId of inviteDraft.userIds) setMediaSubjectPermission("view", "invited_user", userId);
+                }
+                setInviteDraft(null);
+              }}
+            >
+              {inviteDraft?.userIds.length ? `添加 ${inviteDraft.userIds.length} 人` : "添加"}
+            </button>
+          </>
+        }
+      >
+        <div className="mr-invite-dialog">
+          <label className="mr-field">
+            <span className="mr-field__label">搜索用户</span>
+            <input
+              autoFocus
+              className="mr-input"
+              value={inviteDraft?.query ?? ""}
+              placeholder="搜索用户名或昵称"
+              onChange={(event) => setInviteDraft((current) => current ? { ...current, query: event.target.value } : current)}
+            />
+          </label>
+          <div className="mr-invite-dialog__list">
+            {activeInviteOptions.map((member) => (
+              <button
+                key={member.userId}
+                type="button"
+                className={`mr-invite-dialog__option${inviteDraft?.userIds.includes(member.userId) ? " is-active" : ""}`}
+                onClick={() => setInviteDraft((current) => {
+                  if (!current) return current;
+                  const exists = current.userIds.includes(member.userId);
+                  return { ...current, userIds: exists ? current.userIds.filter((userId) => userId !== member.userId) : [...current.userIds, member.userId] };
+                })}
+              >
+                <span>{memberLabel(member)}</span>
+                <small>@{member.username}</small>
+              </button>
+            ))}
+            {activeInviteOptions.length === 0 ? <div className="mr-permission-empty">没有可添加的用户。</div> : null}
+          </div>
+          {activeInviteSelected.length > 0 ? <div className="mr-page__note">将添加 {activeInviteSelected.length} 人，默认权限为查看。</div> : null}
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={!!shareLinksTarget}
+        title="视频分享链接"
+        description={shareLinksTarget ? `创建和管理“${shareLinksTarget.name}”的分享链接。` : undefined}
+        onClose={() => {
+          if (busy) return;
+          setShareLinksTarget(null);
+        }}
+        footer={
+          <button type="button" className="mr-btn mr-btn--primary" disabled={busy} onClick={() => setShareLinksTarget(null)}>
+            完成
+          </button>
+        }
+      >
+        <div className="mr-dialog__stack">
+          <div className="mr-page__user-row mr-collab-row mr-share-row">
+            <label className="mr-field" style={{ margin: 0 }}>
+              <span className="mr-field__label">链接名称</span>
+              <input className="mr-input" value={shareLabel} placeholder="例如：客户评审" onChange={(event) => setShareLabel(event.target.value)} />
+            </label>
+            <label className="mr-field" style={{ margin: 0 }}>
+              <span className="mr-field__label">访问范围</span>
+              <select className="mr-input" value={shareAudience} onChange={(event) => setShareAudience(event.target.value as ShareAudience)}>
+                <option value="anyone">任何人</option>
+                <option value="authenticated">仅登录用户</option>
+              </select>
+            </label>
+            <button className="mr-btn mr-btn--primary" type="button" disabled={busy || sharePermissions.length === 0} onClick={() => void createShareLink()}>
+              创建并复制
             </button>
           </div>
 
-          {collaborationTab === "members" ? (
-            <>
-              <div className="mr-page__user-row mr-collab-row">
-                <label className="mr-field" style={{ margin: 0 }}>
-                  <span className="mr-field__label">用户名</span>
-                  <input className="mr-input" value={memberUsername} placeholder="输入现有用户名" onChange={(event) => setMemberUsername(event.target.value)} />
-                </label>
-                <label className="mr-field" style={{ margin: 0 }}>
-                  <span className="mr-field__label">权限</span>
-                  <select className="mr-input" value={memberRole} onChange={(event) => setMemberRole(event.target.value as Exclude<ProjectMemberRole, "owner">)}>
-                    {PROJECT_MEMBER_ROLE_OPTIONS.map((role) => (
-                      <option key={role.value} value={role.value}>{role.label}</option>
-                    ))}
-                  </select>
-                </label>
-                <button className="mr-btn mr-btn--primary" type="button" disabled={busy || !memberUsername.trim()} onClick={() => void addProjectMember()}>
-                  添加成员
-                </button>
-              </div>
-
-              <div className="mr-dialog__note">
-                编辑者可上传和整理素材；评论者可查看、评论和标注；只读者只能查看。
-              </div>
-
-              <div className="mr-page__stack">
-                {membersLoading ? <div className="mr-page__note">正在加载成员…</div> : null}
-                {!membersLoading && projectMembers.length === 0 ? <div className="mr-page__note">暂无协作成员。</div> : null}
-                {projectMembers.map((member) => (
-                  <div key={member.userId} className="mr-page__user-row">
-                    <div>
-                      <strong>{member.displayName?.trim() || member.username}</strong>
-                      <div className="mr-page__user-meta">@{member.username} · {roleLabel(member.role)}</div>
-                    </div>
-                    {member.role === "owner" ? (
-                      <span className="mr-badge">拥有者</span>
-                    ) : (
-                      <div className="mr-page__actions" style={{ justifyContent: "flex-end" }}>
-                        <select className="mr-input" value={member.role} disabled={busy} onChange={(event) => void updateProjectMemberRole(member, event.target.value as Exclude<ProjectMemberRole, "owner">)}>
-                          {PROJECT_MEMBER_ROLE_OPTIONS.map((role) => (
-                            <option key={role.value} value={role.value}>{role.label}</option>
-                          ))}
-                        </select>
-                        <button className="mr-btn mr-btn--danger" type="button" disabled={busy} onClick={() => void removeProjectMember(member)}>
-                          移除
-                        </button>
-                      </div>
-                    )}
-                  </div>
+          <div className="mr-share-options">
+            <div className="mr-share-options__group">
+              <span className="mr-field__label">有效期</span>
+              <div className="mr-share-options__buttons">
+                {SHARE_EXPIRY_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`mr-permission-choice${shareExpiry === option.value ? " is-active" : ""}`}
+                    onClick={() => setShareExpiry(option.value)}
+                  >
+                    {option.label}
+                  </button>
                 ))}
               </div>
-            </>
-          ) : (
-            <>
-              <div className="mr-page__user-row mr-collab-row">
-                <label className="mr-field" style={{ margin: 0 }}>
-                  <span className="mr-field__label">链接名称</span>
-                  <input className="mr-input" value={shareLabel} placeholder="例如：客户评审" onChange={(event) => setShareLabel(event.target.value)} />
-                </label>
-                <label className="mr-field" style={{ margin: 0 }}>
-                  <span className="mr-field__label">访问范围</span>
-                  <select className="mr-input" value={shareAudience} onChange={(event) => setShareAudience(event.target.value as ShareAudience)}>
-                    <option value="anyone">任何人</option>
-                    <option value="authenticated">仅登录用户</option>
-                  </select>
-                </label>
-                <button className="mr-btn mr-btn--primary" type="button" disabled={busy || sharePermissions.length === 0} onClick={() => void createShareLink()}>
-                  创建并复制
+            </div>
+            <div className="mr-share-options__group">
+              <span className="mr-field__label">权限</span>
+              <div className="mr-page__actions">
+              {SHARE_PERMISSION_OPTIONS.map((permission) => (
+                <button
+                  key={permission.value}
+                  type="button"
+                  className={`mr-btn${sharePermissions.includes(permission.value) ? " mr-btn--primary" : ""}`}
+                  onClick={() => toggleSharePermission(permission.value)}
+                >
+                  {permission.label}
                 </button>
+              ))}
               </div>
+            </div>
+          </div>
 
-              <div className="mr-page__user-row mr-collab-row">
-                <label className="mr-field" style={{ margin: 0 }}>
-                  <span className="mr-field__label">密码（可选）</span>
-                  <input className="mr-input" value={sharePassword} placeholder="不填则无密码" onChange={(event) => setSharePassword(event.target.value)} />
-                </label>
-                <label className="mr-field" style={{ margin: 0 }}>
-                  <span className="mr-field__label">过期时间（可选）</span>
-                  <input className="mr-input" type="datetime-local" value={shareExpiresAt} onChange={(event) => setShareExpiresAt(event.target.value)} />
-                </label>
-                <div className="mr-page__actions" style={{ alignSelf: "end" }}>
-                  {SHARE_PERMISSION_OPTIONS.map((permission) => (
-                    <button
-                      key={permission.value}
-                      type="button"
-                      className={`mr-btn${sharePermissions.includes(permission.value) ? " mr-btn--primary" : ""}`}
-                      onClick={() => toggleSharePermission(permission.value)}
-                    >
-                      {permission.label}
-                    </button>
-                  ))}
+          <div className="mr-dialog__note">
+            新链接创建后会自动复制到剪贴板；已有链接也可以随时重新复制。
+          </div>
+
+          <div className="mr-page__stack">
+            {shareLinksLoading ? <div className="mr-page__note">正在加载分享链接…</div> : null}
+            {!shareLinksLoading && shareLinks.length === 0 ? <div className="mr-page__note">暂无分享链接。</div> : null}
+            {shareLinks.map((link) => (
+              <div key={link.id} className="mr-page__user-row">
+                <div>
+                  <strong>{link.label || "未命名链接"}</strong>
+                  <div className="mr-page__user-meta">
+                    {link.audience === "anyone" ? "任何人" : "仅登录用户"} · {link.permissions.map((permission) => SHARE_PERMISSION_OPTIONS.find((item) => item.value === permission)?.label ?? permission).join("、")}
+                    {link.expiresAt ? ` · 过期：${new Date(link.expiresAt).toLocaleString("zh-CN")}` : " · 不过期"}
+                  </div>
+                </div>
+                <div className="mr-page__actions" style={{ justifyContent: "flex-end" }}>
+                  <button className="mr-btn" type="button" disabled={busy} onClick={() => void copyShareLink(link)}>
+                    复制
+                  </button>
+                  <button className="mr-btn mr-btn--danger" type="button" disabled={busy} onClick={() => void revokeShareLink(link)}>
+                    撤销
+                  </button>
                 </div>
               </div>
-
-              <div className="mr-dialog__note">
-                新链接的完整地址只在创建时返回；创建后会自动复制到剪贴板。
-              </div>
-
-              <div className="mr-page__stack">
-                {shareLinksLoading ? <div className="mr-page__note">正在加载分享链接…</div> : null}
-                {!shareLinksLoading && shareLinks.length === 0 ? <div className="mr-page__note">暂无分享链接。</div> : null}
-                {shareLinks.map((link) => (
-                  <div key={link.id} className="mr-page__user-row">
-                    <div>
-                      <strong>{link.label || "未命名链接"}</strong>
-                      <div className="mr-page__user-meta">
-                        {link.audience === "anyone" ? "任何人" : "仅登录用户"} · {link.permissions.map((permission) => SHARE_PERMISSION_OPTIONS.find((item) => item.value === permission)?.label ?? permission).join("、")}
-                        {link.hasPassword ? " · 有密码" : ""}
-                        {link.revokedAt ? " · 已撤销" : ""}
-                      </div>
-                    </div>
-                    <div className="mr-page__actions" style={{ justifyContent: "flex-end" }}>
-                      {link.url ? (
-                        <button className="mr-btn" type="button" disabled={busy} onClick={() => void copyShareLink(link)}>
-                          复制
-                        </button>
-                      ) : null}
-                      <button className="mr-btn mr-btn--danger" type="button" disabled={busy || !!link.revokedAt} onClick={() => void revokeShareLink(link)}>
-                        撤销
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
+            ))}
+          </div>
         </div>
       </Dialog>
 
@@ -2090,32 +2538,29 @@ export default function AppClient() {
       </Dialog>
 
       {!user ? (
-        <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}>
-          <div className="mr-panel" style={{ width: "min(980px, 100%)", padding: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
-              <h1 style={{ margin: 0, fontSize: 28, letterSpacing: -0.6 }}>MarkReel</h1>
-              <div style={{ opacity: 0.8, fontSize: 13, fontFamily: "var(--font-mono), ui-monospace" }}>
-                API: /api (proxied)
+        <div className="mr-auth">
+          <div className="mr-panel mr-auth__card">
+            <div className="mr-auth__brand">
+              <img src="/logo.png" alt="MarkReel" />
+              <div>
+                <h1>MarkReel</h1>
+                <p>视频审阅工作台</p>
               </div>
             </div>
 
-            <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-              <div style={{ display: "flex", gap: 10 }}>
-                <button className="mr-btn" type="button" onClick={() => setMode("login")}>
+            <div className="mr-auth__form">
+              <div className="mr-auth__tabs" role="tablist" aria-label="登录方式">
+                <button className={`mr-btn${mode === "login" ? " mr-btn--primary" : " mr-btn--surface"}`} type="button" onClick={() => setMode("login")}>
                   登录
                 </button>
-                <button className="mr-btn" type="button" onClick={() => setMode("register")}>
+                <button className={`mr-btn${mode === "register" ? " mr-btn--primary" : " mr-btn--surface"}`} type="button" onClick={() => setMode("register")}>
                   注册
                 </button>
               </div>
 
-              <div style={{ opacity: 0.85, fontSize: 13, lineHeight: 1.5 }}>
-                首次使用：先点“注册”，用用户名 + 密码创建账号；之后用同一用户名密码登录。当前为本地 SQLite 开发模式，数据会持久保存在项目本地数据库中。
-              </div>
-
               {err ? <div className="mr-feedback mr-feedback--error">{err}</div> : null}
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div className="mr-auth__fields">
                 <input className="mr-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="用户名" />
                 <input
                   className="mr-input"
@@ -2130,8 +2575,8 @@ export default function AppClient() {
                 <input className="mr-input" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="昵称 (可选)" />
               ) : null}
 
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <button className="mr-btn" type="button" onClick={() => void onAuth()}>
+              <div className="mr-auth__actions">
+                <button className="mr-btn mr-btn--primary" type="button" onClick={() => void onAuth()} disabled={!canSubmit || busy}>
                   {mode === "login" ? "登录" : "创建账号"}
                 </button>
               </div>
@@ -2153,6 +2598,7 @@ export default function AppClient() {
           onGoSettings={() => router.push("/app/settings")}
           onGoUserSettings={() => router.push("/app/user-settings")}
           onGoAdminSettings={user.globalRole === "admin" ? () => router.push("/app/admin") : undefined}
+          onGoOrganizationSettings={user.globalRole === "admin" ? () => router.push("/app/organizations") : undefined}
           onGoAbout={() => router.push("/app/about")}
           uploads={uploads}
           showUploads={preferences.showUploadQueue}
@@ -2687,9 +3133,17 @@ export default function AppClient() {
                           {contextMenu.target.kind === "folder" ? "打开文件夹" : "打开预览"}
                         </button>
                         {contextMenu.target.kind === "video" ? (
-                          <button className="mr-btn" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("download")}>
-                            下载
-                          </button>
+                          <>
+                            <button className="mr-btn" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("video_permissions")}>
+                              视频权限
+                            </button>
+                            <button className="mr-btn" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("video_share_links")}>
+                              分享链接
+                            </button>
+                            <button className="mr-btn" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("download")}>
+                              下载
+                            </button>
+                          </>
                         ) : null}
                         <button className="mr-btn" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("rename")} disabled={!canEditAssets}>
                           重命名
