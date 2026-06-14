@@ -1963,6 +1963,7 @@ html[data-theme="light"] .mr-player-page__annotation-image-link {
 html[data-theme="light"] .mr-player-page__annotation-item {
   border-color: rgba(37, 36, 33, 0.12);
   background: rgba(255, 255, 255, 0.72);
+  color: var(--text);
 }
 
 html[data-theme="light"] .mr-player-page__annotation-timecode {
@@ -1975,6 +1976,52 @@ html[data-theme="light"] .mr-player-page__annotation-timecode strong {
 
 html[data-theme="light"] .mr-player-page__annotation-replies {
   border-left-color: rgba(37, 36, 33, 0.12);
+}
+
+html[data-theme="light"] .mr-player-page__annotation-body,
+html[data-theme="light"] .mr-player-page__annotation-author-row strong,
+html[data-theme="light"] .mr-player-page__annotation-reply-copy {
+  color: var(--text);
+}
+
+html[data-theme="light"] .mr-player-page__annotation-meta,
+html[data-theme="light"] .mr-player-page__annotation-order {
+  color: rgba(55, 53, 48, 0.72);
+}
+
+html[data-theme="light"] .mr-player-page__annotation-complete {
+  background: rgba(37, 36, 33, 0.055);
+  border-color: rgba(37, 36, 33, 0.16);
+  color: rgba(37, 36, 33, 0.72);
+}
+
+html[data-theme="light"] .mr-player-page__annotation-complete--done {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fffaf4;
+}
+
+html[data-theme="light"] .mr-player-page__annotation-actions .mr-player-page__icon-btn {
+  background: rgba(37, 36, 33, 0.055);
+  border-color: rgba(37, 36, 33, 0.14);
+  color: #262420;
+}
+
+html[data-theme="light"] .mr-player-page__annotation-actions .mr-player-page__icon-btn:hover {
+  background: color-mix(in srgb, var(--accent) 14%, #fff);
+  border-color: color-mix(in srgb, var(--accent) 42%, rgba(37, 36, 33, 0.14));
+  color: #171613;
+}
+
+html[data-theme="light"] .mr-player-page__annotation-actions .mr-player-page__icon-btn:disabled {
+  color: rgba(55, 53, 48, 0.34);
+}
+
+html[data-theme="light"] .mr-player-page__textarea,
+html[data-theme="light"] .mr-player-page__annotation-edit-textarea {
+  background: rgba(255, 255, 255, 0.94);
+  border-color: rgba(37, 36, 33, 0.14);
+  color: #171613;
 }
 
 .mr-player-page__title-input {

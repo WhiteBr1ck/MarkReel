@@ -212,6 +212,20 @@ function uploadToPresignedUrl(url: string, file: File) {
   });
 }
 
+function isInterruptedPlayError(error: unknown) {
+  const err = error as { name?: string; message?: string };
+  return err?.name === "AbortError";
+}
+
+async function safePlayVideo(video: HTMLVideoElement) {
+  try {
+    await video.play();
+  } catch (error) {
+    if (isInterruptedPlayError(error)) return;
+    throw error;
+  }
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
@@ -854,6 +868,7 @@ function PlayerPageInner() {
     currentVideo.addEventListener("volumechange", syncState);
     document.addEventListener("fullscreenchange", syncFullscreen);
     return () => {
+      currentVideo.pause();
       currentVideo.removeEventListener("timeupdate", syncTime);
       currentVideo.removeEventListener("loadedmetadata", syncTime);
       currentVideo.removeEventListener("durationchange", syncTime);
@@ -1037,8 +1052,8 @@ function PlayerPageInner() {
     if (video.paused) {
       if (markupEditorOpen) {
         setMarkupEditorOpen(false);
-          }
-      await video.play();
+      }
+      await safePlayVideo(video);
     } else {
       video.pause();
     }
@@ -1806,7 +1821,7 @@ function PlayerPageInner() {
               onClick={handleVideoSurfaceClick}
               onDoubleClick={handleVideoSurfaceDoubleClick}
             >
-              <video ref={videoRef} key={previewUrl} src={previewUrl} autoPlay playsInline className="mr-player-page__video" />
+              <video ref={videoRef} key={previewUrl} src={previewUrl} playsInline className="mr-player-page__video" />
               {selectedMarkupAttachment?.previewUrl ? (
                 <img className="mr-player-page__saved-markup" src={selectedMarkupAttachment.previewUrl} alt="已保存画笔标注" />
               ) : null}

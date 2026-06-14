@@ -2843,7 +2843,7 @@ export default function AppClient() {
                 <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
                   <span className="mr-badge">/{serverImportPath}</span>
                   <div style={{ display: "flex", gap: 8 }}>
-                    <button className="mr-btn" type="button" disabled={!serverImportParentPath || serverImportBusy} onClick={() => void browseServerImport(serverImportParentPath ?? "")}>
+                    <button className="mr-btn" type="button" disabled={serverImportParentPath === null || serverImportBusy} onClick={() => void browseServerImport(serverImportParentPath ?? "")}>
                       上一级
                     </button>
                     <button className="mr-btn" type="button" disabled={serverImportBusy} onClick={() => void browseServerImport(serverImportPath)}>

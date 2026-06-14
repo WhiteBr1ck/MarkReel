@@ -53,6 +53,20 @@ type Props = {
 };
 
 type TimeDisplayMode = "current" | "total" | "remaining" | "frames";
+
+function isInterruptedPlayError(error: unknown) {
+  const err = error as { name?: string; message?: string };
+  return err?.name === "AbortError";
+}
+
+async function safePlayVideo(video: HTMLVideoElement) {
+  try {
+    await video.play();
+  } catch (error) {
+    if (isInterruptedPlayError(error)) return;
+    throw error;
+  }
+}
 type SidebarTab = "file" | "annotations";
 
 const DISPLAY_MODE_LABEL: Record<TimeDisplayMode, string> = {
@@ -198,6 +212,7 @@ export function PlayerReview({ mediaId, title, previewUrl, item, onClose, loadAn
     document.addEventListener("fullscreenchange", syncFullscreen);
 
     return () => {
+      currentVideo.pause();
       currentVideo.removeEventListener("timeupdate", syncTime);
       currentVideo.removeEventListener("loadedmetadata", syncTime);
       currentVideo.removeEventListener("durationchange", syncTime);
@@ -257,7 +272,7 @@ export function PlayerReview({ mediaId, title, previewUrl, item, onClose, loadAn
   async function togglePlayback() {
     const video = videoRef.current;
     if (!video) return;
-    if (video.paused) await video.play();
+    if (video.paused) await safePlayVideo(video);
     else video.pause();
   }
 
@@ -359,7 +374,7 @@ export function PlayerReview({ mediaId, title, previewUrl, item, onClose, loadAn
           </div>
 
           <div className="mr-review__video-shell">
-            <video ref={videoRef} key={previewUrl} src={previewUrl} autoPlay playsInline className="mr-review__video" />
+            <video ref={videoRef} key={previewUrl} src={previewUrl} playsInline className="mr-review__video" />
           </div>
 
           <div className="mr-review__controls">
