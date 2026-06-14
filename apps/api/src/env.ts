@@ -46,13 +46,15 @@ const EnvSchema = z.object({
   REDIS_URL: z.string().min(1).optional(),
 
   S3_ENDPOINT: z.string().url(),
-  S3_PUBLIC_ENDPOINT: z.string().url().optional(),
+  S3_PUBLIC_ENDPOINT: z.preprocess((value) => value === "" ? undefined : value, z.string().url().optional()),
   S3_REGION: z.string().default("us-east-1"),
   S3_ACCESS_KEY: z.string().min(1),
   S3_SECRET_KEY: z.string().min(1),
   S3_BUCKET_ORIGINAL: z.string().min(1),
   S3_BUCKET_DERIVED: z.string().min(1),
   S3_BUCKET_ATTACHMENTS: z.string().min(1),
+
+  MARKREEL_SERVER_IMPORT_ROOT: z.string().trim().min(1).optional(),
 
   FFMPEG_THREADS: z.coerce.number().int().positive().default(2),
   HLS_SEGMENT_SECONDS: z.coerce.number().int().positive().default(4)

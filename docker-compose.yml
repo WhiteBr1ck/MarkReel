@@ -8,8 +8,11 @@ services:
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
-    env_file:
-      - .env.docker
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-markreel}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-markreel_secret}
+    ports:
+      - "127.0.0.1:9000:9000"
     volumes:
       - minio-data:/data
 
@@ -17,8 +20,12 @@ services:
     image: minio/mc:latest
     depends_on:
       - minio
-    env_file:
-      - .env.docker
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-markreel}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-markreel_secret}
+      S3_BUCKET_ORIGINAL: ${S3_BUCKET_ORIGINAL:-markreel-original}
+      S3_BUCKET_DERIVED: ${S3_BUCKET_DERIVED:-markreel-derived}
+      S3_BUCKET_ATTACHMENTS: ${S3_BUCKET_ATTACHMENTS:-markreel-attachments}
     entrypoint: ["/bin/sh", "/infra/minio-init.sh"]
     volumes:
       - ./infra:/infra:ro
@@ -28,20 +35,57 @@ services:
     build:
       context: .
       dockerfile: infra/Dockerfile.api
-    env_file:
-      - .env.docker
+    environment:
+      WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:5090}
+      API_BASE_URL: ${API_BASE_URL:-http://localhost:4000}
+      MARKREEL_STORE: ${MARKREEL_STORE:-sqlite}
+      DATABASE_URL: file:/app/data/markreel.db
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-markreel}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-markreel_secret}
+      S3_BUCKET_ORIGINAL: ${S3_BUCKET_ORIGINAL:-markreel-original}
+      S3_BUCKET_DERIVED: ${S3_BUCKET_DERIVED:-markreel-derived}
+      S3_BUCKET_ATTACHMENTS: ${S3_BUCKET_ATTACHMENTS:-markreel-attachments}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-markreel_default_access_secret_change_me}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-markreel_default_refresh_secret_change_me}
+      JWT_ACCESS_TTL_SECONDS: ${JWT_ACCESS_TTL_SECONDS:-900}
+      JWT_REFRESH_TTL_SECONDS: ${JWT_REFRESH_TTL_SECONDS:-2592000}
+      JWT_AUTH_INSTANCE_ID: ${JWT_AUTH_INSTANCE_ID:-markreel-docker-default}
+      MARKREEL_ADMIN_USERNAME: ${MARKREEL_ADMIN_USERNAME:-admin}
+      MARKREEL_ADMIN_PASSWORD: ${MARKREEL_ADMIN_PASSWORD:-adminadmin}
+      MARKREEL_ADMIN_DISPLAY_NAME: ${MARKREEL_ADMIN_DISPLAY_NAME:-管理员}
+      MARKREEL_ALLOW_PUBLIC_REGISTRATION: ${MARKREEL_ALLOW_PUBLIC_REGISTRATION:-false}
+      MARKREEL_SERVER_IMPORT_ROOT: /imports
+      FFMPEG_THREADS: ${FFMPEG_THREADS:-2}
+      HLS_SEGMENT_SECONDS: ${HLS_SEGMENT_SECONDS:-4}
     depends_on:
       - redis
       - minio-init
     volumes:
       - sqlite-data:/app/data
+      # Optional: add host media libraries as sibling folders under /imports.
+      - C:/Users/YOU/Desktop:/imports/Desktop:ro
 
   worker:
     build:
       context: .
       dockerfile: infra/Dockerfile.worker
-    env_file:
-      - .env.docker
+    environment:
+      MARKREEL_STORE: ${MARKREEL_STORE:-sqlite}
+      DATABASE_URL: file:/app/data/markreel.db
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-markreel}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-markreel_secret}
+      S3_BUCKET_ORIGINAL: ${S3_BUCKET_ORIGINAL:-markreel-original}
+      S3_BUCKET_DERIVED: ${S3_BUCKET_DERIVED:-markreel-derived}
+      S3_BUCKET_ATTACHMENTS: ${S3_BUCKET_ATTACHMENTS:-markreel-attachments}
+      FFMPEG_THREADS: ${FFMPEG_THREADS:-2}
+      HLS_SEGMENT_SECONDS: ${HLS_SEGMENT_SECONDS:-4}
     depends_on:
       - api
       - redis
@@ -53,8 +97,10 @@ services:
     build:
       context: .
       dockerfile: infra/Dockerfile.web
-    env_file:
-      - .env.docker
+    environment:
+      WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:5090}
+      API_BASE_URL: ${API_BASE_URL:-http://localhost:4000}
+      INTERNAL_API_BASE_URL: http://api:4000
     depends_on:
       - api
     ports:

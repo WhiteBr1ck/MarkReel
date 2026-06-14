@@ -1,7 +1,7 @@
 {
   "name": "@markreel/worker",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "scripts": {
     "start:dev": "tsx watch src/main.ts",
     "test": "node --test"

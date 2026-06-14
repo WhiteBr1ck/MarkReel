@@ -1,9 +1,9 @@
 "use client";
 
 import type { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { AppShell } from "./_components/shell";
+import { AppShell, UploadPanel } from "./_components/shell";
 import type { FolderNode, Project, SortMode, UploadItem, UploadStage, ViewMode, WorkspaceItem } from "./_components/shell";
 import { Dialog, NameDialog } from "./_components/dialog";
 import { formatBytes, formatDuration } from "./_components/workspaceMock";
@@ -76,6 +76,19 @@ type MediaStatusResponse = {
     id: string;
     status: string;
   };
+};
+
+type ProcessingStatusResponse = {
+  media: {
+    id: string;
+    status: string;
+    updatedAt: string;
+  };
+  processing: {
+    state: string;
+    progress: number | null;
+    failedReason: string | null;
+  } | null;
 };
 
 type ProjectMemberRole = "owner" | "editor" | "commenter" | "viewer";
@@ -223,16 +236,35 @@ function expiryToIso(value: ShareExpiry) {
 }
 
 type UploadMode = "original" | "compress";
+type UploadSource = "local" | "server";
 type UploadResolution = "1080p" | "720p";
 type UploadFps = "source" | 24 | 25 | 30 | 60;
 
 type UploadDraft = {
+  source: UploadSource;
   file: File | null;
+  files: File[];
+  serverPath: string;
   title: string;
   mode: UploadMode;
   targetResolution: UploadResolution;
   targetFps: UploadFps;
   folderId: string;
+};
+
+type ServerImportEntry = {
+  name: string;
+  path: string;
+  kind: "directory" | "file";
+  sizeBytes?: number;
+  updatedAt: number;
+};
+
+type ServerImportBrowseResponse = {
+  rootEnabled: boolean;
+  path: string;
+  parentPath: string | null;
+  entries: ServerImportEntry[];
 };
 
 type UploadMenuOption = {
@@ -330,6 +362,7 @@ type AttachmentPresignResponse = {
   upload: {
     method: "PUT";
     url: string;
+    proxyUrl?: string;
     objectKey: string;
     bucket: string;
   };
@@ -342,6 +375,53 @@ type FeedbackState = {
   message: string;
 };
 
+const UPLOAD_QUEUE_STORAGE_KEY = "markreel.uploadQueue.v1";
+
+let uploadQueueState: UploadItem[] | null = null;
+const uploadQueueSubscribers = new Set<(uploads: UploadItem[]) => void>();
+
+function readStoredUploadQueue() {
+  if (typeof window === "undefined") return [] as UploadItem[];
+  if (uploadQueueState) return uploadQueueState;
+  try {
+    const raw = window.sessionStorage.getItem(UPLOAD_QUEUE_STORAGE_KEY);
+    uploadQueueState = raw ? JSON.parse(raw) as UploadItem[] : [];
+  } catch {
+    uploadQueueState = [];
+  }
+  return uploadQueueState;
+}
+
+function writeUploadQueue(next: UploadItem[]) {
+  uploadQueueState = next;
+  if (typeof window !== "undefined") {
+    try {
+      window.sessionStorage.setItem(UPLOAD_QUEUE_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Session storage can be unavailable in private or constrained browser contexts.
+    }
+  }
+  uploadQueueSubscribers.forEach((listener) => listener(next));
+}
+
+function updateUploadQueue(updater: (current: UploadItem[]) => UploadItem[]) {
+  const current = uploadQueueState ?? readStoredUploadQueue();
+  const next = updater(current);
+  writeUploadQueue(next);
+  return next;
+}
+
+function getUploadQueueItem(id: string) {
+  return (uploadQueueState ?? readStoredUploadQueue()).find((item) => item.id === id) ?? null;
+}
+
+function subscribeUploadQueue(listener: (uploads: UploadItem[]) => void) {
+  uploadQueueSubscribers.add(listener);
+  return () => {
+    uploadQueueSubscribers.delete(listener);
+  };
+}
+
 type ContextMenuState = {
   x: number;
   y: number;
@@ -353,30 +433,105 @@ type ContextMenuState = {
     | { kind: "project"; id: string; name: string; ownerId: string };
 };
 
-function uploadToPresignedUrl(url: string, file: File, onProgress?: (progress: number) => void) {
+function uploadToPresignedUrl(
+  url: string,
+  file: File,
+  onProgress?: (stats: { progress: number; loaded: number; total?: number; speedBps?: number; etaSeconds?: number }) => void,
+  contentType?: string,
+  signal?: AbortSignal
+) {
   return new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    const samples: Array<{ time: number; loaded: number }> = [];
+    let settled = false;
+
+    function rejectOnce(error: Error) {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    }
+
+    function resolveOnce() {
+      if (settled) return;
+      settled = true;
+      resolve();
+    }
+
+    if (signal?.aborted) {
+      rejectOnce(new Error("upload_cancelled"));
+      return;
+    }
+
+    const onAbort = () => {
+      xhr.abort();
+      rejectOnce(new Error("upload_cancelled"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    function cleanup() {
+      signal?.removeEventListener("abort", onAbort);
+    }
+
     xhr.open("PUT", url, true);
-    if (file.type) xhr.setRequestHeader("Content-Type", file.type);
+    const resolvedContentType = contentType || file.type;
+    if (resolvedContentType) xhr.setRequestHeader("Content-Type", resolvedContentType);
 
     xhr.upload.onprogress = (event) => {
-      if (!event.lengthComputable) return;
-      const progress = Math.round((event.loaded / event.total) * 100);
-      onProgress?.(progress);
+      const now = Date.now();
+      samples.push({ time: now, loaded: event.loaded });
+      while (samples.length > 2 && now - samples[0].time > 5000) samples.shift();
+      const first = samples[0];
+      const elapsedSeconds = first ? (now - first.time) / 1000 : 0;
+      const speedBps = first && elapsedSeconds > 0 ? Math.max(0, (event.loaded - first.loaded) / elapsedSeconds) : undefined;
+      const total = event.lengthComputable ? event.total : file.size || undefined;
+      const progress = total ? Math.round((event.loaded / total) * 100) : 0;
+      const remainingBytes = total ? Math.max(0, total - event.loaded) : undefined;
+      const etaSeconds = remainingBytes != null && speedBps && speedBps > 0 ? remainingBytes / speedBps : undefined;
+      onProgress?.({ progress, loaded: event.loaded, total, speedBps, etaSeconds });
     };
 
     xhr.onload = () => {
+      cleanup();
       if (xhr.status >= 200 && xhr.status < 300) {
-        onProgress?.(100);
-        resolve();
+        onProgress?.({ progress: 100, loaded: file.size, total: file.size });
+        resolveOnce();
         return;
       }
-      reject(new Error(`upload_failed:${xhr.status}`));
+      rejectOnce(new Error(`upload_failed:${xhr.status}`));
     };
 
-    xhr.onerror = () => reject(new Error("upload_failed:network"));
+    xhr.onerror = () => {
+      cleanup();
+      rejectOnce(new Error("upload_failed:network"));
+    };
+    xhr.onabort = () => {
+      cleanup();
+      rejectOnce(new Error("upload_cancelled"));
+    };
     xhr.send(file);
   });
+}
+
+function shouldFallbackUpload(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message === "upload_failed:network" || message === "upload_failed:0" || message === "upload_failed:403";
+}
+
+async function uploadWithFallback(
+  upload: { url: string; proxyUrl?: string | null },
+  file: File,
+  onProgress?: (stats: { progress: number; loaded: number; total?: number; speedBps?: number; etaSeconds?: number }) => void,
+  contentType?: string,
+  signal?: AbortSignal,
+  onFallback?: () => void
+) {
+  try {
+    await uploadToPresignedUrl(upload.url, file, onProgress, contentType, signal);
+  } catch (error) {
+    if (!upload.proxyUrl || !shouldFallbackUpload(error)) throw error;
+    onFallback?.();
+    await uploadToPresignedUrl(upload.proxyUrl, file, onProgress, contentType, signal);
+  }
 }
 
 function toZhError(e: any): string {
@@ -394,7 +549,13 @@ function toZhError(e: any): string {
     database_unavailable: "数据库不可用，请先启动 API 的 SQLite/Prisma 链路",
     internal_server_error: "服务器内部错误（请查看 API 控制台日志）",
     processing_failed: "视频处理失败，请检查 worker、ffmpeg 和对象存储日志",
-    queue_unavailable: "压缩队列不可用，请先启动 Redis、worker，并确认 REDIS_URL 可连通"
+    queue_unavailable: "压缩队列不可用，请先启动 Redis、worker，并确认 REDIS_URL 可连通",
+    server_import_disabled: "服务器路径导入未启用，请先在 Docker 中挂载目录并配置导入根路径",
+    invalid_import_path: "服务器路径不在允许的导入目录内",
+    import_path_not_found: "服务器路径不存在或无法访问",
+    import_path_not_file: "请选择一个视频文件，而不是文件夹",
+    server_import_failed: "服务器路径导入失败，请查看 API 日志",
+    server_import_timeout: "服务器路径导入超时，请检查挂载目录、MinIO 和视频文件是否可读取"
   };
   return map[code] ?? code;
 }
@@ -441,6 +602,7 @@ function formatBitrate(item: Extract<WorkspaceItem, { kind: "video" }>) {
 }
 
 function formatUploadError(e: any) {
+  if (e?.message === "upload_cancelled") return "上传已取消";
   let message = toZhError(e);
   if (typeof e?.message === "string" && e.message.startsWith("upload_failed:")) {
     const detail = e.message.slice("upload_failed:".length);
@@ -561,7 +723,13 @@ export default function AppClient() {
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [uploadDraft, setUploadDraft] = useState<UploadDraft | null>(null);
-  const [uploads, setUploads] = useState<UploadItem[]>([]);
+  const [serverImportPath, setServerImportPath] = useState("");
+  const [serverImportEntries, setServerImportEntries] = useState<ServerImportEntry[]>([]);
+  const [serverImportParentPath, setServerImportParentPath] = useState<string | null>(null);
+  const [serverImportBusy, setServerImportBusy] = useState(false);
+  const [serverImportError, setServerImportError] = useState<string | null>(null);
+  const [uploads, setUploads] = useState<UploadItem[]>(() => readStoredUploadQueue());
+  const uploadAborters = useRef(new Map<string, AbortController>());
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [previewBusy, setPreviewBusy] = useState(false);
   const [feedback, setFeedback] = useState<FeedbackState | null>(null);
@@ -636,6 +804,8 @@ export default function AppClient() {
     return new Set(parts);
   }, [sel]);
 
+  useEffect(() => subscribeUploadQueue(setUploads), []);
+
   function setQuery(next: Record<string, string | null | undefined>) {
     const params = new URLSearchParams(sp.toString());
     params.delete("inspector");
@@ -700,7 +870,7 @@ export default function AppClient() {
     setWorkspace(null);
     setDialog(null);
     setUploadDraft(null);
-    setUploads([]);
+    setUploadQueue(() => []);
     setPreviewUrls({});
     setPreviewBusy(false);
     setFeedback(null);
@@ -1109,6 +1279,10 @@ export default function AppClient() {
     setFeedback({ tone, message });
   }
 
+  function setUploadQueue(updater: (current: UploadItem[]) => UploadItem[]) {
+    updateUploadQueue(updater);
+  }
+
   function getRenameTarget() {
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return { error: "请先选中一个条目" } as const;
@@ -1132,6 +1306,35 @@ export default function AppClient() {
       error: undefined,
       actionLabel: "可预览"
     });
+  }
+
+  function isUploadCancelled(id: string) {
+    return getUploadQueueItem(id)?.stage === "cancelled";
+  }
+
+  async function deletePendingMedia(mediaId?: string) {
+    if (!mediaId) return;
+    try {
+      await api(`/media/${mediaId}`, { method: "DELETE" });
+      await Promise.all([refreshWorkspace(effectivePid, effectiveFid), refreshTrash(effectivePid)]);
+    } catch {
+      // Best-effort cleanup. The queue item remains cancelled even if cleanup fails.
+    }
+  }
+
+  function cancelUpload(uploadId: string) {
+    const target = getUploadQueueItem(uploadId);
+    if (!target) return;
+    uploadAborters.current.get(uploadId)?.abort();
+    updateUpload(uploadId, {
+      stage: "cancelled",
+      actionLabel: "已取消",
+      error: undefined,
+      speedBps: undefined,
+      etaSeconds: undefined
+    });
+    void deletePendingMedia(target.mediaId);
+    showFeedback("info", `已取消 ${target.fileName}`);
   }
 
   function wait(ms: number) {
@@ -1167,8 +1370,42 @@ export default function AppClient() {
   }
 
   async function markUploadReady(id: string, mediaId: string) {
-    for (let attempt = 0; attempt < 40; attempt += 1) {
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      if (isUploadCancelled(id)) return false;
       try {
+        const detail = await api<ProcessingStatusResponse>(`/media/${mediaId}/processing-status`);
+        const status = detail.media.status;
+
+        if (status === "failed") {
+          setUploadError(id, detail.processing?.failedReason || "视频处理失败，请检查 worker、ffmpeg 和对象存储日志");
+          return false;
+        }
+
+        if (status === "queued") {
+          updateUpload(id, {
+            stage: "queued",
+            progress: 96,
+            mediaId,
+            actionLabel: "等待 worker 处理"
+          });
+        } else if (status === "processing") {
+          const rawProgress = detail.processing?.progress ?? 10;
+          const processingProgress = Math.max(0, Math.min(100, rawProgress));
+          updateUpload(id, {
+            stage: "transcoding",
+            progress: Math.max(96, Math.min(99, 96 + Math.round(processingProgress * 0.03))),
+            mediaId,
+            actionLabel: `转码中 ${Math.round(processingProgress)}%`
+          });
+        } else if (status === "uploaded") {
+          updateUpload(id, {
+            stage: "verifying",
+            progress: 95,
+            mediaId,
+            actionLabel: "读取媒体信息"
+          });
+        }
+
         const preview = await api<PreviewResponse>(`/media/${mediaId}/preview`);
         setPreviewUrls((prev) => ({ ...prev, [mediaId]: preview.preview.url }));
         setUploadReady(id, mediaId);
@@ -1180,31 +1417,11 @@ export default function AppClient() {
           return false;
         }
 
-        if (e?.data?.error !== "preview_not_ready") {
+        if (e?.data?.error !== "preview_not_ready" && e?.data?.error !== "not_found") {
           const message = formatUploadError(e);
           setUploadError(id, message);
           return false;
         }
-
-        const detail = await api<MediaStatusResponse>(`/media/${mediaId}`);
-        const status = detail.media.status;
-
-        if (status === "failed") {
-          setUploadError(id, "视频处理失败，请检查 worker、ffmpeg 和对象存储日志");
-          return false;
-        }
-
-        updateUpload(id, {
-          stage: "processing",
-          progress: 98,
-          mediaId,
-          actionLabel:
-            status === "queued"
-              ? "已上传，等待处理"
-              : status === "processing"
-                ? "已上传，正在生成预览"
-                : "预览生成中"
-        });
 
         await wait(1500);
       }
@@ -1390,13 +1607,20 @@ export default function AppClient() {
   function openUploadDialog() {
     if (!effectivePid || !rootFid) return;
     setUploadDraft({
+      source: "local",
       file: null,
+      files: [],
+      serverPath: "",
       title: "",
       mode: "compress",
       targetResolution: "1080p",
       targetFps: 30,
       folderId: effectiveFid ?? rootFid
     });
+    setServerImportPath("");
+    setServerImportEntries([]);
+    setServerImportParentPath(null);
+    setServerImportError(null);
   }
 
   function openCreateWorkspaceDialog() {
@@ -1428,7 +1652,7 @@ export default function AppClient() {
   }
 
   function updateUpload(id: string, patch: Partial<UploadItem>) {
-    setUploads((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+    setUploadQueue((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
   }
 
   async function openItem(item: WorkspaceItem) {
@@ -1446,7 +1670,7 @@ export default function AppClient() {
     setPreviewBusy(true);
     try {
       const data = await api<PreviewResponse>(`/media/${item.id}/preview`);
-      setUploads((prev) => prev.map((upload) => (upload.mediaId === item.id ? { ...upload, stage: "ready", progress: 100, error: undefined, actionLabel: "可预览" } : upload)));
+      setUploadQueue((prev) => prev.map((upload) => (upload.mediaId === item.id ? { ...upload, stage: "ready", progress: 100, error: undefined, actionLabel: "可预览" } : upload)));
       localStorage.setItem("mr_last_workbench_url", `${pathname}?${sp.toString()}` || pathname);
       router.push(`/app/player?mid=${encodeURIComponent(item.id)}`);
       showFeedback("success", `已打开 ${item.name}`);
@@ -1481,7 +1705,7 @@ export default function AppClient() {
     try {
       const data = await api<PreviewResponse>(`/media/${mediaId}/preview`);
       const title = uploads.find((upload) => upload.mediaId === mediaId)?.fileName ?? "预览";
-      setUploads((prev) => prev.map((upload) => (upload.mediaId === mediaId ? { ...upload, stage: "ready", progress: 100, error: undefined, actionLabel: "可预览" } : upload)));
+      setUploadQueue((prev) => prev.map((upload) => (upload.mediaId === mediaId ? { ...upload, stage: "ready", progress: 100, error: undefined, actionLabel: "可预览" } : upload)));
       localStorage.setItem("mr_last_workbench_url", `${pathname}?${sp.toString()}` || pathname);
       router.push(`/app/player?mid=${encodeURIComponent(mediaId)}`);
       showFeedback("success", `已打开 ${title}`);
@@ -1506,7 +1730,7 @@ export default function AppClient() {
       method: "POST",
       body: JSON.stringify({ filename: file.name, contentType: file.type || "application/octet-stream" })
     });
-    await uploadToPresignedUrl(data.upload.url, file);
+    await uploadWithFallback(data.upload, file);
     return {
       kind: "image",
       objectKey: data.upload.objectKey,
@@ -1522,19 +1746,6 @@ export default function AppClient() {
       method: "POST",
       body: JSON.stringify(input)
     });
-  }
-
-  async function locateUploadItem(mediaId: string) {
-    const current = workspace?.items.find((item) => item.id === mediaId) ?? null;
-    const refreshed = current ? workspace : await refreshWorkspace(effectivePid, effectiveFid);
-    const resolved = refreshed?.items.find((item) => item.id === mediaId) ?? current;
-    if (!resolved) {
-      showFeedback("info", "素材已上传，当前目录里还没看到它，稍后会自动刷新出来。");
-      return;
-    }
-
-    setQuery({ select: "1", sel: resolved.id, panel: "1" });
-    showFeedback("success", `已定位 ${resolved.name}`);
   }
 
   async function onDeleteSelected() {
@@ -1741,62 +1952,81 @@ export default function AppClient() {
   }
 
   function clearUploadHistory() {
-    setUploads([]);
+    setUploadQueue((prev) => prev.filter((item) => item.stage !== "ready" && item.stage !== "error" && item.stage !== "cancelled"));
     showFeedback("success", "已清空上传记录");
   }
 
-  async function onUpload(draft: UploadDraft) {
-    if (!effectivePid || !rootFid || !draft.file) return;
-    setErr(null);
-    setBusy(true);
-    showFeedback("info", "已加入 1 个上传任务");
-
-    const uploadId = `${Date.now()}-0-${draft.file.name}`;
-    const queued = [
-      {
-        id: uploadId,
-        fileName: draft.title,
-        progress: 2,
-        stage: "preparing" as UploadStage,
-        actionLabel: "排队中"
-      }
-    ];
-    setUploads((prev) => [...queued, ...prev].slice(0, 12));
-
+  async function uploadSingleFile(args: { draft: UploadDraft; file: File; title: string; uploadId: string }) {
+    const { draft, file, title, uploadId } = args;
+    const controller = new AbortController();
+    uploadAborters.current.set(uploadId, controller);
+    let mediaId: string | undefined;
     try {
+      if (isUploadCancelled(uploadId)) return false;
       updateUpload(uploadId, { stage: "preparing", progress: 5, actionLabel: "准备上传" });
 
       const created = await api<{ media: { id: string } }>(`/projects/${effectivePid}/media`, {
         method: "POST",
         body: JSON.stringify({
-          title: draft.title,
+          title,
           folderId: draft.folderId === rootFid ? null : draft.folderId
         })
       });
+      mediaId = created.media.id;
+
+      if (isUploadCancelled(uploadId)) {
+        void deletePendingMedia(mediaId);
+        return false;
+      }
 
       updateUpload(uploadId, { mediaId: created.media.id, stage: "signing", progress: 12, actionLabel: "获取上传地址" });
 
-      const presigned = await api<{ upload: { url: string; objectKey: string; mode: "original" | "compress" } }>(
+      const presigned = await api<{ upload: { url: string; proxyUrl?: string; objectKey: string; mode: "original" | "compress" } }>(
         `/media/${created.media.id}/upload/presign`,
         {
           method: "POST",
           body: JSON.stringify({
-            filename: draft.file.name,
-            contentType: draft.file.type || "application/octet-stream",
+            filename: file.name,
+            contentType: file.type || "application/octet-stream",
             mode: draft.mode
           })
         }
       );
 
+      if (isUploadCancelled(uploadId)) {
+        void deletePendingMedia(mediaId);
+        return false;
+      }
+
       updateUpload(uploadId, { stage: "uploading", progress: 18, actionLabel: "正在上传文件" });
-      await uploadToPresignedUrl(presigned.upload.url, draft.file, (progress) => {
-        updateUpload(uploadId, { stage: "uploading", progress: Math.max(18, progress), actionLabel: "正在上传文件" });
+      await uploadWithFallback(presigned.upload, file, (stats) => {
+        if (isUploadCancelled(uploadId)) return;
+        updateUpload(uploadId, {
+          stage: "uploading",
+          progress: Math.max(18, Math.min(92, stats.progress)),
+          actionLabel: "正在上传文件",
+          bytesUploaded: stats.loaded,
+          totalBytes: stats.total,
+          speedBps: stats.speedBps,
+          etaSeconds: stats.etaSeconds
+        });
+      }, file.type || "application/octet-stream", controller.signal, () => {
+        if (!isUploadCancelled(uploadId)) updateUpload(uploadId, { actionLabel: "直传不可用，切换代理上传" });
       });
 
+      if (isUploadCancelled(uploadId)) {
+        void deletePendingMedia(mediaId);
+        return false;
+      }
+
       updateUpload(uploadId, {
-        stage: "processing",
-        progress: 96,
-        actionLabel: draft.mode === "compress" ? "已上传，等待处理" : "已上传，正在刷新预览"
+        stage: "verifying",
+        progress: 94,
+        bytesUploaded: file.size,
+        totalBytes: file.size,
+        speedBps: undefined,
+        etaSeconds: undefined,
+        actionLabel: "读取媒体信息"
       });
       await api(`/media/${created.media.id}/process`, {
         method: "POST",
@@ -1813,23 +2043,172 @@ export default function AppClient() {
         })
       });
 
+      if (isUploadCancelled(uploadId)) {
+        void deletePendingMedia(mediaId);
+        return false;
+      }
+
       void markUploadReady(uploadId, created.media.id);
       await refreshWorkspace(effectivePid, draft.folderId);
+      return true;
+    } catch (e: any) {
+      if (e?.message === "upload_cancelled") {
+        updateUpload(uploadId, { stage: "cancelled", actionLabel: "已取消", error: undefined, speedBps: undefined, etaSeconds: undefined });
+        void deletePendingMedia(mediaId);
+        return false;
+      }
+      const message = formatUploadError(e);
+      setErr(message);
+      showFeedback("error", message);
+      setUploadError(uploadId, message);
+      return false;
+    } finally {
+      uploadAborters.current.delete(uploadId);
+    }
+  }
+
+  async function onUpload(draft: UploadDraft) {
+    if (!effectivePid || !rootFid) return;
+    const files = draft.files.length > 0 ? draft.files : draft.file ? [draft.file] : [];
+    if (files.length === 0) return;
+    setErr(null);
+    showFeedback("info", `已加入 ${files.length} 个上传任务`);
+
+    const tasks = files.map((file, index) => {
+      const title = files.length === 1 ? draft.title : stripFileExtension(file.name);
+      return {
+        file,
+        title,
+        uploadId: `${Date.now()}-${index}-${file.name}`
+      };
+    });
+
+    setUploadQueue((prev) => [
+      ...tasks.map((task) => ({
+        id: task.uploadId,
+        fileName: task.title,
+        progress: 2,
+        stage: "preparing" as UploadStage,
+        actionLabel: "排队中",
+        totalBytes: task.file.size,
+        source: "local" as const
+      })),
+      ...prev
+    ].slice(0, 24));
+
+    const concurrency = 2;
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
+      for (;;) {
+        const index = cursor;
+        cursor += 1;
+        const task = tasks[index];
+        if (!task) return;
+        await uploadSingleFile({ draft, file: task.file, title: task.title, uploadId: task.uploadId });
+      }
+    });
+    void Promise.all(workers).then(() => {
       showFeedback("success", "上传请求已完成，正在为新素材刷新工作台");
+    });
+  }
+
+  async function browseServerImport(path = "") {
+    setServerImportBusy(true);
+    setServerImportError(null);
+    try {
+      const data = await api<ServerImportBrowseResponse>(`/server-import/browse?path=${encodeURIComponent(path)}`);
+      setServerImportPath(data.path);
+      setServerImportParentPath(data.parentPath);
+      setServerImportEntries(data.entries);
+    } catch (e: any) {
+      setServerImportEntries([]);
+      setServerImportParentPath(null);
+      setServerImportError(toZhError(e));
+    } finally {
+      setServerImportBusy(false);
+    }
+  }
+
+  function selectServerImportFile(entry: ServerImportEntry) {
+    if (entry.kind !== "file") return;
+    setUploadDraft((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        serverPath: entry.path,
+        title: prev.title.trim() ? prev.title : stripFileExtension(entry.name)
+      };
+    });
+  }
+
+  async function onServerImport(draft: UploadDraft) {
+    if (!effectivePid || !rootFid || !draft.serverPath) return;
+    setErr(null);
+    showFeedback("info", "已加入 1 个服务器导入任务");
+
+    const uploadId = `${Date.now()}-server-${draft.serverPath}`;
+    setUploadQueue((prev) => [
+      {
+        id: uploadId,
+        fileName: draft.title,
+        progress: 8,
+        stage: "preparing" as UploadStage,
+        actionLabel: "准备导入",
+        source: "server" as const
+      },
+      ...prev
+    ].slice(0, 12));
+
+    try {
+      updateUpload(uploadId, { stage: "importing", progress: 35, actionLabel: "正在从服务器路径导入" });
+      const imported = await api<{ media: { id: string }; queued: boolean }>(`/projects/${effectivePid}/media/import/server`, {
+        method: "POST",
+        body: JSON.stringify({
+          path: draft.serverPath,
+          title: draft.title,
+          folderId: draft.folderId === rootFid ? null : draft.folderId,
+          mode: draft.mode,
+          transcode:
+            draft.mode === "compress"
+              ? {
+                  resolution: draft.targetResolution,
+                  fps: draft.targetFps
+                }
+              : undefined
+        })
+      });
+
+      updateUpload(uploadId, {
+        mediaId: imported.media.id,
+        stage: imported.queued ? "queued" : "verifying",
+        progress: 96,
+        actionLabel: draft.mode === "compress" ? "已导入，等待处理" : "已导入，正在刷新预览"
+      });
+      void markUploadReady(uploadId, imported.media.id);
+      await refreshWorkspace(effectivePid, draft.folderId);
+      showFeedback("success", "服务器路径导入已完成，正在刷新工作台");
     } catch (e: any) {
       const message = formatUploadError(e);
       setErr(message);
       showFeedback("error", message);
       setUploadError(uploadId, message);
-    } finally {
-      setBusy(false);
     }
   }
+
+  function isUploadHiddenFromWorkspace(item: WorkspaceItem) {
+    if (item.kind !== "video") return false;
+    return uploads.some((upload) => upload.mediaId === item.id && upload.stage !== "ready" && upload.stage !== "error" && upload.stage !== "cancelled");
+  }
+
+  useEffect(() => {
+    if (!uploadDraft || uploadDraft.source !== "server" || serverImportEntries.length > 0 || serverImportBusy || serverImportError) return;
+    void browseServerImport("");
+  }, [uploadDraft?.source, serverImportEntries.length, serverImportBusy, serverImportError]);
 
 
   const items: WorkspaceItem[] = useMemo(() => sortItems(filterItems(workspace?.items ?? [], q), sort), [workspace, q, sort]);
   const filteredTrashItems = useMemo(() => sortItems(filterItems(trashItems, q), sort), [trashItems, q, sort]);
-  const visibleItems = scope === "trash" ? filteredTrashItems : items;
+  const visibleItems = useMemo(() => scope === "trash" ? filteredTrashItems : items.filter((item) => !isUploadHiddenFromWorkspace(item)), [filteredTrashItems, items, scope, uploads]);
   const crumbs = workspace?.breadcrumbs ?? [];
   const folderOptions = useMemo(() => buildFolderOptions(rootFid, workspace?.folderTree ?? null), [rootFid, workspace?.folderTree]);
 
@@ -2411,7 +2790,7 @@ export default function AppClient() {
       <Dialog
         open={!!uploadDraft}
         title="上传视频"
-        description="先确认视频名称、压缩参数和目标目录，再开始上传。"
+        description="选择本地文件或服务器挂载路径，再确认处理参数和目标目录。"
         onClose={() => setUploadDraft(null)}
         footer={
           <>
@@ -2421,40 +2800,113 @@ export default function AppClient() {
             <button
               type="button"
               className="mr-btn mr-btn--primary"
-              disabled={busy || !uploadDraft?.file || !uploadDraft.title.trim() || !uploadDraft.folderId}
+              disabled={!uploadDraft?.title.trim() || !uploadDraft.folderId || (uploadDraft.source === "local" ? uploadDraft.files.length === 0 && !uploadDraft.file : !uploadDraft.serverPath)}
               onClick={() => {
-                if (!uploadDraft?.file || !uploadDraft.title.trim() || !uploadDraft.folderId) return;
+                if (!uploadDraft?.title.trim() || !uploadDraft.folderId) return;
+                if (uploadDraft.source === "local" && uploadDraft.files.length === 0 && !uploadDraft.file) return;
+                if (uploadDraft.source === "server" && !uploadDraft.serverPath) return;
                 const nextDraft = { ...uploadDraft, title: uploadDraft.title.trim() };
                 setUploadDraft(null);
-                void onUpload(nextDraft);
+                if (nextDraft.source === "server") void onServerImport(nextDraft);
+                else void onUpload(nextDraft);
               }}
             >
-              {busy ? "上传中…" : "开始上传"}
+              {uploadDraft?.source === "server" ? "开始导入" : "开始上传"}
             </button>
           </>
         }
       >
         <div className="mr-upload-dialog">
-          <label className="mr-field">
-            <span className="mr-field__label">选择视频文件</span>
-            <input
-              className="mr-input mr-upload-dialog__file-input"
-              type="file"
-              accept="video/*"
-              onChange={(e) => {
-                const file = e.target.files?.[0] ?? null;
-                setUploadDraft((prev) => {
-                  if (!prev || !file) return prev;
-                  const nextTitle = prev.title.trim() ? prev.title : stripFileExtension(file.name);
-                  return { ...prev, file, title: nextTitle };
-                });
-                e.currentTarget.value = "";
-              }}
-            />
-            <span className="mr-upload-dialog__hint">
-              {uploadDraft?.file ? `已选择：${uploadDraft.file.name}` : "暂未选择文件"}
-            </span>
-          </label>
+          <div className="mr-field">
+            <span className="mr-field__label">来源</span>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {([
+                ["local", "本地文件"],
+                ["server", "服务器路径"]
+              ] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={`mr-btn${uploadDraft?.source === value ? " mr-btn--primary" : ""}`}
+                  onClick={() => setUploadDraft((prev) => (prev ? { ...prev, source: value } : prev))}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {uploadDraft?.source === "server" ? (
+            <div className="mr-field">
+              <span className="mr-field__label">服务器路径</span>
+              <div className="mr-panel" style={{ padding: 10, boxShadow: "none", background: "var(--panel3)", display: "grid", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+                  <span className="mr-badge">/{serverImportPath}</span>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button className="mr-btn" type="button" disabled={!serverImportParentPath || serverImportBusy} onClick={() => void browseServerImport(serverImportParentPath ?? "")}>
+                      上一级
+                    </button>
+                    <button className="mr-btn" type="button" disabled={serverImportBusy} onClick={() => void browseServerImport(serverImportPath)}>
+                      刷新
+                    </button>
+                  </div>
+                </div>
+                {serverImportError ? <div className="mr-dialog__note">{serverImportError}</div> : null}
+                <div style={{ display: "grid", gap: 6, maxHeight: 220, overflow: "auto" }}>
+                  {serverImportBusy ? (
+                    <div style={{ color: "var(--muted)", padding: 8 }}>正在读取目录…</div>
+                  ) : serverImportEntries.length === 0 ? (
+                    <div style={{ color: "var(--muted)", padding: 8 }}>没有可显示的文件。</div>
+                  ) : (
+                    serverImportEntries.map((entry) => {
+                      const selected = uploadDraft.serverPath === entry.path;
+                      return (
+                        <button
+                          key={entry.path}
+                          type="button"
+                          className={`mr-btn${selected ? " mr-btn--primary" : ""}`}
+                          style={{ justifyContent: "space-between", textAlign: "left" }}
+                          onClick={() => entry.kind === "directory" ? void browseServerImport(entry.path) : selectServerImportFile(entry)}
+                        >
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                            {entry.kind === "directory" ? <IconFolder size={16} /> : <IconVideo size={16} />}
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.name}</span>
+                          </span>
+                          {entry.kind === "file" ? <span style={{ color: selected ? "inherit" : "var(--muted)", fontSize: 12 }}>{formatBytes(entry.sizeBytes)}</span> : null}
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+                <span className="mr-upload-dialog__hint">
+                  {uploadDraft.serverPath ? `已选择：/${uploadDraft.serverPath}` : "请选择一个服务器挂载目录内的视频文件"}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <label className="mr-field">
+              <span className="mr-field__label">选择视频文件</span>
+              <input
+                className="mr-input mr-upload-dialog__file-input"
+                type="file"
+                accept="video/*"
+                multiple
+                onChange={(e) => {
+                  const files = Array.from(e.target.files ?? []);
+                  const file = files[0] ?? null;
+                  setUploadDraft((prev) => {
+                    if (!prev || !file) return prev;
+                    const nextTitle = prev.title.trim() ? prev.title : files.length === 1 ? stripFileExtension(file.name) : `${files.length} 个视频`;
+                    return { ...prev, file, files, title: nextTitle };
+                  });
+                  e.currentTarget.value = "";
+                }}
+              />
+              <span className="mr-upload-dialog__hint">
+                {uploadDraft?.files.length ? `已选择 ${uploadDraft.files.length} 个文件` : uploadDraft?.file ? `已选择：${uploadDraft.file.name}` : "暂未选择文件"}
+              </span>
+            </label>
+          )}
 
           <label className="mr-field">
             <span className="mr-field__label">视频名称</span>
@@ -2589,7 +3041,6 @@ export default function AppClient() {
           inspectorOpen={inspectorPaneOpen}
           onClearUploads={() => clearUploadHistory()}
           onOpenUploadItem={(mediaId) => void openUploadItem(mediaId)}
-          onLocateUploadItem={(mediaId) => void locateUploadItem(mediaId)}
           onLogout={() => void onLogout()}
           onGoProjectHome={() => {
             if (!effectivePid) return;
@@ -2600,8 +3051,6 @@ export default function AppClient() {
           onGoAdminSettings={user.globalRole === "admin" ? () => router.push("/app/admin") : undefined}
           onGoOrganizationSettings={user.globalRole === "admin" ? () => router.push("/app/organizations") : undefined}
           onGoAbout={() => router.push("/app/about")}
-          uploads={uploads}
-          showUploads={preferences.showUploadQueue}
           left={
             <>
               <div className="mr-side-section">
@@ -3219,6 +3668,15 @@ export default function AppClient() {
                   )
                 ) : null}
               </div>
+              {preferences.showUploadQueue ? (
+                <UploadPanel
+                  uploads={uploads}
+                  onClear={() => clearUploadHistory()}
+                  onOpenItem={(mediaId) => void openUploadItem(mediaId)}
+                  onCancelItem={(uploadId) => cancelUpload(uploadId)}
+                  defaultCollapsed
+                />
+              ) : null}
             </div>
           }
         />

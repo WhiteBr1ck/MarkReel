@@ -64,7 +64,7 @@ export type WorkspaceItem =
       status?: string;
     };
 
-export type UploadStage = "preparing" | "signing" | "uploading" | "processing" | "ready" | "error";
+export type UploadStage = "preparing" | "signing" | "uploading" | "verifying" | "importing" | "queued" | "transcoding" | "processing" | "ready" | "error" | "cancelled";
 
 export type UploadItem = {
   id: string;
@@ -74,6 +74,11 @@ export type UploadItem = {
   error?: string;
   mediaId?: string;
   actionLabel?: string;
+  bytesUploaded?: number;
+  totalBytes?: number;
+  speedBps?: number;
+  etaSeconds?: number;
+  source?: "local" | "server";
 };
 
 type Props = {
@@ -81,7 +86,7 @@ type Props = {
   inspectorOpen: boolean;
   onClearUploads: () => void;
   onOpenUploadItem: (mediaId: string) => void;
-  onLocateUploadItem: (mediaId: string) => void;
+  onCancelUploadItem?: (uploadId: string) => void;
   onLogout: () => void;
 
   onGoProjectHome: () => void;
@@ -177,32 +182,72 @@ function UploadStageLabel({ stage }: { stage: UploadItem["stage"] }) {
     preparing: "准备中",
     signing: "获取上传地址",
     uploading: "上传中",
-    processing: "已上传，生成预览中",
+    verifying: "读取媒体信息",
+    importing: "服务器导入中",
+    queued: "等待转码",
+    transcoding: "转码中",
+    processing: "生成预览中",
     ready: "可以预览",
-    error: "失败"
+    error: "失败",
+    cancelled: "已取消"
   };
   return <span>{label[stage]}</span>;
 }
 
-function UploadPanel({
+function formatUploadBytes(value?: number) {
+  if (!value || !Number.isFinite(value)) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`;
+}
+
+function formatUploadEta(seconds?: number) {
+  if (!seconds || !Number.isFinite(seconds) || seconds < 1) return null;
+  if (seconds < 60) return `剩余 ${Math.ceil(seconds)} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.ceil(seconds % 60);
+  return rest > 0 ? `剩余 ${minutes} 分 ${rest} 秒` : `剩余 ${minutes} 分`;
+}
+
+function isTerminalUploadStage(stage: UploadItem["stage"]) {
+  return stage === "ready" || stage === "error" || stage === "cancelled";
+}
+
+function isCancellableUploadStage(stage: UploadItem["stage"]) {
+  return stage === "preparing" || stage === "signing" || stage === "uploading" || stage === "verifying" || stage === "importing";
+}
+
+export function UploadPanel({
   uploads,
   onClear,
   onOpenItem,
-  onLocateItem
+  onCancelItem,
+  defaultCollapsed = true
 }: {
   uploads: UploadItem[];
   onClear: () => void;
   onOpenItem: (mediaId: string) => void;
-  onLocateItem: (mediaId: string) => void;
+  onCancelItem?: (uploadId: string) => void;
+  defaultCollapsed?: boolean;
 }) {
   const { labels } = useUiPreferences();
-  const activeCount = useMemo(() => uploads.filter((item) => item.stage !== "ready" && item.stage !== "error").length, [uploads]);
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  const activeCount = useMemo(() => uploads.filter((item) => !isTerminalUploadStage(item.stage)).length, [uploads]);
+  const overallProgress = useMemo(() => {
+    if (uploads.length === 0) return 0;
+    return Math.round(uploads.reduce((sum, item) => sum + Math.max(0, Math.min(100, item.progress)), 0) / uploads.length);
+  }, [uploads]);
 
   if (uploads.length === 0) return null;
 
   return (
     <div className="mr-shell__uploads">
-      <div className="mr-panel mr-shell__uploads-card">
+      <div className={`mr-panel mr-shell__uploads-card${collapsed ? " mr-shell__uploads-card--collapsed" : ""}`}>
         <div className="mr-shell__uploads-head">
           <div>
             <div className="mr-shell__uploads-title">{labels.shell.uploadsKicker}</div>
@@ -211,20 +256,34 @@ function UploadPanel({
           <div className="mr-shell__uploads-actions">
             <span className="mr-badge mr-badge--accent">{uploads.length} {labels.shell.uploadTasks}</span>
             {activeCount > 0 ? <span className="mr-badge">{activeCount} {labels.shell.uploadActive}</span> : null}
-            <button className="mr-btn" type="button" onClick={onClear}>
+            <button className="mr-btn" type="button" onClick={() => setCollapsed((value) => !value)}>
+              {collapsed ? "展开" : "收起"}
+            </button>
+            <button className="mr-btn" type="button" onClick={onClear} disabled={activeCount > 0} title={activeCount > 0 ? "仍有任务进行中" : labels.shell.clearUploads}>
               {labels.shell.clearUploads}
             </button>
           </div>
         </div>
 
-        <div className="mr-shell__upload-list">
+        <div className="mr-shell__uploads-summary">
+          <div className="mr-progress">
+            <div className="mr-progress__bar" style={{ width: `${Math.max(4, overallProgress)}%` }} />
+          </div>
+          <span>{activeCount > 0 ? `整体 ${overallProgress}%` : "队列空闲"}</span>
+        </div>
+
+        {collapsed ? null : <div className="mr-shell__upload-list">
           {uploads.map((item) => {
             const isReady = item.stage === "ready";
             const isError = item.stage === "error";
+            const isCancelled = item.stage === "cancelled";
+            const canCancel = !!onCancelItem && isCancellableUploadStage(item.stage);
+            const eta = formatUploadEta(item.etaSeconds);
+            const hasTransferMeta = item.totalBytes || item.bytesUploaded || item.speedBps;
             return (
               <div
                 key={item.id}
-                className={`mr-shell__upload-item${isReady ? " mr-shell__upload-item--ready" : ""}${isError ? " mr-shell__upload-item--error" : ""}`}
+                className={`mr-shell__upload-item${isReady ? " mr-shell__upload-item--ready" : ""}${isError ? " mr-shell__upload-item--error" : ""}${isCancelled ? " mr-shell__upload-item--cancelled" : ""}`}
               >
                 <div className="mr-shell__upload-row">
                   <div className="mr-shell__upload-main">
@@ -240,8 +299,15 @@ function UploadPanel({
                         </>
                       ) : null}
                     </div>
+                    {hasTransferMeta ? (
+                      <div className="mr-shell__upload-transfer">
+                        {item.totalBytes ? <span>{formatUploadBytes(item.bytesUploaded)} / {formatUploadBytes(item.totalBytes)}</span> : null}
+                        {item.speedBps ? <span>{formatUploadBytes(item.speedBps)}/s</span> : null}
+                        {eta ? <span>{eta}</span> : null}
+                      </div>
+                    ) : null}
                   </div>
-                  <span className={`mr-badge${isReady ? " mr-badge--accent" : ""}`}>{isError ? "异常" : isReady ? "可用" : "处理中"}</span>
+                  <span className={`mr-badge${isReady ? " mr-badge--accent" : ""}`}>{isError ? "异常" : isReady ? "可用" : isCancelled ? "已取消" : "处理中"}</span>
                 </div>
 
                 <div className="mr-progress" style={{ marginTop: 10 }}>
@@ -256,15 +322,23 @@ function UploadPanel({
                         打开预览
                       </button>
                     ) : null}
-                    <button className="mr-btn" type="button" onClick={() => onLocateItem(item.mediaId!)}>
-                      定位素材
+                    {canCancel ? (
+                      <button className="mr-btn mr-btn--danger" type="button" onClick={() => onCancelItem(item.id)}>
+                        取消
+                      </button>
+                    ) : null}
+                  </div>
+                ) : canCancel ? (
+                  <div className="mr-shell__upload-actions">
+                    <button className="mr-btn mr-btn--danger" type="button" onClick={() => onCancelItem(item.id)}>
+                      取消
                     </button>
                   </div>
                 ) : null}
               </div>
             );
           })}
-        </div>
+        </div>}
       </div>
     </div>
   );
@@ -363,15 +437,6 @@ export function AppShell(props: Props) {
           onGoAdminSettings={props.onGoAdminSettings}
           onGoOrganizationSettings={props.onGoOrganizationSettings}
         />
-
-        {props.showUploads === false ? null : (
-          <UploadPanel
-            uploads={props.uploads ?? []}
-            onClear={props.onClearUploads}
-            onOpenItem={props.onOpenUploadItem}
-            onLocateItem={props.onLocateUploadItem}
-          />
-        )}
 
         <div className="mr-shell__body">
           <aside className="mr-shell__sidebar">{props.left}</aside>

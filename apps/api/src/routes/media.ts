@@ -2,7 +2,8 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { nanoid } from "nanoid";
 import { execFile } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
+import * as fs from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +11,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import { prisma } from "../db";
 import { getUserId, requireUser } from "../auth/requireUser";
-import { presignGetObject, statObject, getObjectStream } from "../s3";
+import { presignGetObject, presignPutObject, statObject, getObjectStream, putObjectStream } from "../s3";
 import { putRequestBodyObject } from "../uploadProxy";
 import { env } from "../env";
 import { auditLog } from "../audit";
@@ -46,6 +47,18 @@ const EnqueueSchema = z.object({
   transcode: TranscodeSchema.optional()
 });
 
+const ServerImportListSchema = z.object({
+  path: z.string().optional().default("")
+});
+
+const ServerImportSchema = z.object({
+  path: z.string().min(1),
+  title: z.string().trim().min(1).max(200).optional(),
+  folderId: z.string().optional().nullable(),
+  mode: z.enum(["original", "compress"]).default("compress"),
+  transcode: TranscodeSchema.optional()
+});
+
 const MediaPermissionSchema = z.enum(["manage", "annotate", "view"]);
 const MediaPermissionSubjectSchema = z.enum(["organization", "invited_user", "public"]);
 
@@ -68,6 +81,12 @@ const DownloadQuerySchema = z.object({
 });
 
 const execFileAsync = promisify(execFile);
+
+function timeoutAfter(ms: number, message: string) {
+  return new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error(message)), ms);
+  });
+}
 
 const FfprobeFormatSchema = z.object({
   duration: z.string().optional(),
@@ -203,6 +222,169 @@ async function assertProjectAccess(userId: string, projectId: string, capability
   return access && hasCapability(access, capability) ? access : null;
 }
 
+async function readLocalMediaMetadata(filePath: string, sizeBytes?: number) {
+  const result = await execFileAsync("ffprobe", [
+    "-v",
+    "error",
+    "-show_format",
+    "-show_streams",
+    "-of",
+    "json",
+    filePath
+  ], { timeout: 30000, windowsHide: true });
+
+  const parsed = FfprobeResultSchema.parse(JSON.parse(result.stdout));
+  const videoStream = parsed.streams?.find((stream) => stream.codec_type === "video");
+
+  const durationSeconds =
+    parseNumericString(videoStream?.duration) ??
+    parseNumericString(parsed.format?.duration);
+  const bitrate =
+    parseNumericString(videoStream?.bit_rate) ??
+    parseNumericString(parsed.format?.bit_rate);
+  const explicitFrames = parseNumericString(videoStream?.nb_frames);
+  const fps = parseFrameRate(videoStream?.avg_frame_rate) ?? parseFrameRate(videoStream?.r_frame_rate);
+  const derivedFrameCount = !explicitFrames && durationSeconds && fps ? Math.round(durationSeconds * fps) : undefined;
+
+  return {
+    sizeBytes,
+    durationMs: durationSeconds ? Math.max(1, Math.round(durationSeconds * 1000)) : undefined,
+    width: videoStream?.width,
+    height: videoStream?.height,
+    bitrateKbps: bitrate ? Math.max(1, Math.round(bitrate / 1000)) : undefined,
+    frameCount: explicitFrames ? Math.max(1, Math.round(explicitFrames)) : derivedFrameCount ? Math.max(1, derivedFrameCount) : undefined
+  };
+}
+
+function normalizeRelativeImportPath(value: string) {
+  const normalized = value.replace(/\\/g, "/").replace(/^\/+/, "");
+  return normalized === "." ? "" : normalized;
+}
+
+async function resolveServerImportPath(relativePath: string) {
+  if (!env.MARKREEL_SERVER_IMPORT_ROOT) return null;
+  const root = path.resolve(env.MARKREEL_SERVER_IMPORT_ROOT);
+  const requested = path.resolve(root, normalizeRelativeImportPath(relativePath));
+  const relative = path.relative(root, requested);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  return { root, absolutePath: requested, relativePath: relative === "" ? "" : normalizeRelativeImportPath(relative) };
+}
+
+function stripFileExtension(fileName: string) {
+  const ext = path.extname(fileName);
+  return ext ? fileName.slice(0, -ext.length) : fileName;
+}
+
+function appendTitleSuffix(baseTitle: string, suffix: string) {
+  const maxBaseLength = Math.max(1, 200 - suffix.length);
+  const trimmedBase = baseTitle.length > maxBaseLength ? baseTitle.slice(0, maxBaseLength).trimEnd() : baseTitle;
+  return `${trimmedBase}${suffix}`;
+}
+
+async function makeUniqueMediaTitle(args: {
+  projectId: string;
+  folderId: string | null | undefined;
+  title: string;
+  excludeMediaId?: string;
+}) {
+  const baseTitle = (args.title.trim() || "Untitled").slice(0, 200);
+  const existing = await prisma.media.findMany({
+    where: {
+      projectId: args.projectId,
+      folderId: args.folderId ?? null,
+      deletedAt: null,
+      ...(args.excludeMediaId ? { id: { not: args.excludeMediaId } } : {})
+    },
+    select: { title: true }
+  });
+  const titles = new Set(existing.map((item) => item.title));
+  if (!titles.has(baseTitle)) return baseTitle;
+
+  for (let index = 2; index < 10000; index += 1) {
+    const candidate = appendTitleSuffix(baseTitle, ` (${index})`);
+    if (!titles.has(candidate)) return candidate;
+  }
+
+  return appendTitleSuffix(baseTitle, ` (${Date.now()})`);
+}
+
+async function registerMediaFile(args: {
+  mediaId: string;
+  objectKey: string;
+  mode: "original" | "compress";
+  metadata: Awaited<ReturnType<typeof readLocalMediaMetadata>>;
+  transcode?: z.infer<typeof TranscodeSchema>;
+}) {
+  await prisma.mediaFile.upsert({
+    where: {
+      mediaId_originalObjectKey: {
+        mediaId: args.mediaId,
+        originalObjectKey: args.objectKey
+      }
+    },
+    update: {
+      derivedPrefix: null,
+      mode: args.mode,
+      durationMs: args.metadata.durationMs,
+      width: args.metadata.width,
+      height: args.metadata.height,
+      sizeBytes: args.metadata.sizeBytes,
+      bitrateKbps: args.metadata.bitrateKbps,
+      frameCount: args.metadata.frameCount
+    },
+    create: {
+      mediaId: args.mediaId,
+      originalObjectKey: args.objectKey,
+      derivedPrefix: null,
+      mode: args.mode,
+      durationMs: args.metadata.durationMs,
+      width: args.metadata.width,
+      height: args.metadata.height,
+      sizeBytes: args.metadata.sizeBytes,
+      bitrateKbps: args.metadata.bitrateKbps,
+      frameCount: args.metadata.frameCount
+    }
+  });
+
+  if (args.mode === "original") {
+    await prisma.media.update({
+      where: { id: args.mediaId },
+      data: { status: "ready" }
+    });
+    return { queued: false };
+  }
+
+  if (!mediaQueue) {
+    await prisma.media.update({
+      where: { id: args.mediaId },
+      data: { status: "failed" }
+    });
+    return { queued: false, error: "queue_unavailable" as const };
+  }
+
+  try {
+    await mediaQueue.add("transcode", {
+      mediaId: args.mediaId,
+      originalObjectKey: args.objectKey,
+      mode: args.mode,
+      transcode: args.transcode
+    });
+  } catch {
+    await prisma.media.update({
+      where: { id: args.mediaId },
+      data: { status: "failed" }
+    });
+    return { queued: false, error: "queue_unavailable" as const };
+  }
+
+  await prisma.media.update({
+    where: { id: args.mediaId },
+    data: { status: "queued" }
+  });
+
+  return { queued: true };
+}
+
 async function assertMediaAccess(userId: string, mediaId: string, capability: "media:view" | "media:manage" = "media:view") {
   const result = await getMediaAccess({ userId, mediaId });
   if (!result || !hasMediaCapability(result.access, capability)) return null;
@@ -310,12 +492,14 @@ export async function mediaRoutes(app: FastifyInstance) {
       const folderOk = await assertFolderAccess(projectId, input.folderId ?? null);
       if (!folderOk) return reply.code(404).send({ error: "folder_not_found" });
 
+      const title = await makeUniqueMediaTitle({ projectId, folderId: input.folderId ?? null, title: input.title });
+
       const media = await prisma.media.create({
         data: {
           projectId,
           creatorId: userId,
           folderId: input.folderId ?? null,
-          title: input.title,
+          title,
           seriesId: input.seriesId ?? null,
           permissionGrants: {
             create: ["manage", "annotate", "view"].map((permission) => ({ subjectType: "creator", subjectKey: "", permission: permission as any }))
@@ -444,10 +628,18 @@ export async function mediaRoutes(app: FastifyInstance) {
       if (!folderOk) return reply.code(404).send({ error: "folder_not_found" });
     }
 
+    const currentMedia = input.title !== undefined || input.folderId !== undefined
+      ? await prisma.media.findFirst({ where: { id: mediaId, deletedAt: null }, select: { projectId: true, folderId: true, title: true } })
+      : null;
+    const targetFolderId = input.folderId !== undefined ? input.folderId : currentMedia?.folderId;
+    const title = currentMedia && (input.title !== undefined || input.folderId !== undefined)
+      ? await makeUniqueMediaTitle({ projectId: access.projectId, folderId: targetFolderId ?? null, title: input.title ?? currentMedia.title, excludeMediaId: mediaId })
+      : undefined;
+
     const media = await prisma.media.update({
       where: { id: mediaId },
       data: {
-        ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(title !== undefined ? { title } : {}),
         ...(input.folderId !== undefined ? { folderId: input.folderId } : {})
       },
       select: { id: true, title: true, folderId: true }
@@ -765,6 +957,43 @@ export async function mediaRoutes(app: FastifyInstance) {
     return reply.send(initialObject.body);
   });
 
+  app.get("/media/:mediaId/processing-status", { preHandler: requireUser }, async (req, reply) => {
+    const userId = getUserId(req);
+    const mediaId = (req.params as any).mediaId as string;
+    const access = await assertMediaAccess(userId, mediaId);
+    if (!access) return reply.code(404).send({ error: "not_found" });
+
+    const media = await prisma.media.findUnique({
+      where: { id: mediaId },
+      select: { id: true, status: true, updatedAt: true }
+    });
+    if (!media) return reply.code(404).send({ error: "not_found" });
+
+    let processing: { state: string; progress: number | null; failedReason: string | null } | null = null;
+    if (mediaQueue) {
+      const jobs = await mediaQueue.getJobs(["waiting", "delayed", "active", "completed", "failed"], 0, 50, false).catch(() => []);
+      const job = jobs.find((item) => item.data.mediaId === mediaId) ?? null;
+      if (job) {
+        const state = await job.getState().catch(() => "unknown");
+        const rawProgress = job.progress;
+        processing = {
+          state,
+          progress: typeof rawProgress === "number" ? rawProgress : null,
+          failedReason: job.failedReason || null
+        };
+      }
+    }
+
+    return {
+      media: {
+        id: media.id,
+        status: media.status,
+        updatedAt: media.updatedAt
+      },
+      processing
+    };
+  });
+
   app.get("/media/:mediaId/download", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const mediaId = (req.params as any).mediaId as string;
@@ -795,7 +1024,8 @@ export async function mediaRoutes(app: FastifyInstance) {
 
     const url = await presignGetObject({
       bucket: env.S3_BUCKET_ORIGINAL,
-      objectKey: file.originalObjectKey
+      objectKey: file.originalObjectKey,
+      req
     });
 
     await auditLog({
@@ -831,7 +1061,13 @@ export async function mediaRoutes(app: FastifyInstance) {
         : "bin";
 
       const objectKey = `original/${mediaId}/${nanoid(16)}.${ext}`;
-      const url = `/api/media/${mediaId}/upload/file?objectKey=${encodeURIComponent(objectKey)}`;
+      const url = await presignPutObject({
+        bucket: env.S3_BUCKET_ORIGINAL,
+        objectKey,
+        contentType: input.contentType,
+        req
+      });
+      const proxyUrl = `/api/objects/${encodeURIComponent(env.S3_BUCKET_ORIGINAL)}/${encodeURIComponent(objectKey)}`;
 
       await auditLog({
         req,
@@ -846,6 +1082,7 @@ export async function mediaRoutes(app: FastifyInstance) {
         upload: {
           method: "PUT",
           url,
+          proxyUrl,
           objectKey,
           bucket: env.S3_BUCKET_ORIGINAL,
           mode: input.mode
@@ -885,73 +1122,15 @@ export async function mediaRoutes(app: FastifyInstance) {
     const transcode = input.mode === "compress" ? input.transcode : undefined;
 
     const metadata = await readMediaMetadata(input.originalObjectKey);
-
-    await prisma.mediaFile.upsert({
-      where: {
-        mediaId_originalObjectKey: {
-          mediaId,
-          originalObjectKey: input.originalObjectKey
-        }
-      },
-      update: {
-        derivedPrefix: null,
-        mode: input.mode,
-        durationMs: metadata.durationMs,
-        width: metadata.width,
-        height: metadata.height,
-        sizeBytes: metadata.sizeBytes,
-        bitrateKbps: metadata.bitrateKbps,
-        frameCount: metadata.frameCount
-      },
-      create: {
-        mediaId,
-        originalObjectKey: input.originalObjectKey,
-        derivedPrefix: null,
-        mode: input.mode,
-        durationMs: metadata.durationMs,
-        width: metadata.width,
-        height: metadata.height,
-        sizeBytes: metadata.sizeBytes,
-        bitrateKbps: metadata.bitrateKbps,
-        frameCount: metadata.frameCount
-      }
+    const registered = await registerMediaFile({
+      mediaId,
+      objectKey: input.originalObjectKey,
+      mode: input.mode,
+      metadata,
+      transcode
     });
 
-    if (input.mode === "original") {
-      await prisma.media.update({
-        where: { id: mediaId },
-        data: { status: "ready" }
-      });
-      return reply.send({ ok: true, queued: false, metadata });
-    }
-
-    if (!mediaQueue) {
-      await prisma.media.update({
-        where: { id: mediaId },
-        data: { status: "failed" }
-      });
-      return reply.code(503).send({ error: "queue_unavailable" });
-    }
-
-    try {
-      await mediaQueue.add("transcode", {
-        mediaId,
-        originalObjectKey: input.originalObjectKey,
-        mode: input.mode,
-        transcode
-      });
-    } catch {
-      await prisma.media.update({
-        where: { id: mediaId },
-        data: { status: "failed" }
-      });
-      return reply.code(503).send({ error: "queue_unavailable" });
-    }
-
-    await prisma.media.update({
-      where: { id: mediaId },
-      data: { status: "queued" }
-    });
+    if (registered.error) return reply.code(503).send({ error: registered.error });
 
     await auditLog({
       req,
@@ -962,7 +1141,127 @@ export async function mediaRoutes(app: FastifyInstance) {
       meta: { mode: input.mode, transcode }
     });
 
-    return reply.send({ ok: true, queued: true, metadata });
+    return reply.send({ ok: true, queued: registered.queued, metadata });
+  });
+
+  app.get("/server-import/browse", { preHandler: requireUser }, async (req, reply) => {
+    const input = ServerImportListSchema.parse(req.query ?? {});
+    const resolved = await resolveServerImportPath(input.path);
+    if (!resolved) return reply.code(env.MARKREEL_SERVER_IMPORT_ROOT ? 400 : 404).send({ error: env.MARKREEL_SERVER_IMPORT_ROOT ? "invalid_import_path" : "server_import_disabled" });
+
+    let entries: Array<{ name: string; path: string; kind: "directory" | "file"; sizeBytes?: number; updatedAt: number }>;
+    try {
+      const dirents = await fs.readdir(resolved.absolutePath, { withFileTypes: true });
+      entries = await Promise.all(
+        dirents
+          .filter((entry) => !entry.name.startsWith("."))
+          .map(async (entry) => {
+            const entryAbsolutePath = path.join(resolved.absolutePath, entry.name);
+            const stat = await fs.stat(entryAbsolutePath);
+            const entryRelativePath = normalizeRelativeImportPath(path.join(resolved.relativePath, entry.name));
+            return {
+              name: entry.name,
+              path: entryRelativePath,
+              kind: entry.isDirectory() ? "directory" as const : "file" as const,
+              sizeBytes: entry.isFile() ? stat.size : undefined,
+              updatedAt: stat.mtimeMs
+            };
+          })
+      );
+    } catch {
+      return reply.code(404).send({ error: "import_path_not_found" });
+    }
+
+    return {
+      rootEnabled: true,
+      path: resolved.relativePath,
+      parentPath: resolved.relativePath ? normalizeRelativeImportPath(path.dirname(resolved.relativePath)) : null,
+      entries: entries.sort((a, b) => a.kind === b.kind ? a.name.localeCompare(b.name, "zh-CN") : a.kind === "directory" ? -1 : 1)
+    };
+  });
+
+  app.post("/projects/:projectId/media/import/server", { preHandler: requireUser }, async (req, reply) => {
+    const userId = getUserId(req);
+    const projectId = (req.params as any).projectId as string;
+    const input = ServerImportSchema.parse(req.body);
+
+    const access = await assertProjectAccess(userId, projectId, "project:upload");
+    if (!access) return reply.code(404).send({ error: "not_found" });
+
+    const folderOk = await assertFolderAccess(projectId, input.folderId ?? null);
+    if (!folderOk) return reply.code(404).send({ error: "folder_not_found" });
+
+    const resolved = await resolveServerImportPath(input.path);
+    if (!resolved) return reply.code(env.MARKREEL_SERVER_IMPORT_ROOT ? 400 : 404).send({ error: env.MARKREEL_SERVER_IMPORT_ROOT ? "invalid_import_path" : "server_import_disabled" });
+
+    let stat;
+    try {
+      stat = await fs.stat(resolved.absolutePath);
+    } catch {
+      return reply.code(404).send({ error: "import_path_not_found" });
+    }
+    if (!stat.isFile()) return reply.code(400).send({ error: "import_path_not_file" });
+
+    let mediaId: string | undefined;
+    try {
+      const title = await makeUniqueMediaTitle({
+        projectId,
+        folderId: input.folderId ?? null,
+        title: input.title ?? stripFileExtension(path.basename(resolved.absolutePath))
+      });
+      const transcode = input.mode === "compress" ? input.transcode : undefined;
+      req.log.info({ importPath: resolved.relativePath, sizeBytes: stat.size }, "Starting server media import");
+      const metadata = await readLocalMediaMetadata(resolved.absolutePath, stat.size);
+
+      const media = await prisma.media.create({
+        data: {
+          projectId,
+          creatorId: userId,
+          folderId: input.folderId ?? null,
+          title,
+          permissionGrants: {
+            create: ["manage", "annotate", "view"].map((permission) => ({ subjectType: "creator", subjectKey: "", permission: permission as any }))
+          }
+        },
+        select: { id: true, projectId: true, folderId: true, title: true, status: true, reviewStatus: true, createdAt: true, updatedAt: true }
+      });
+      mediaId = media.id;
+
+      const ext = path.extname(resolved.absolutePath).replace(/^\./, "").slice(0, 10) || "bin";
+      const objectKey = `original/${media.id}/${nanoid(16)}.${ext}`;
+      await Promise.race([
+        putObjectStream({
+          bucket: env.S3_BUCKET_ORIGINAL,
+          objectKey,
+          body: createReadStream(resolved.absolutePath),
+          contentLength: stat.size
+        }),
+        timeoutAfter(120000, "server_import_storage_timeout")
+      ]);
+
+      const registered = await registerMediaFile({ mediaId: media.id, objectKey, mode: input.mode, metadata, transcode });
+      if (registered.error) return reply.code(503).send({ error: registered.error });
+
+      await auditLog({
+        req,
+        actorUserId: userId,
+        action: "media.import_server",
+        entityType: "Media",
+        entityId: media.id,
+        meta: { projectId, folderId: media.folderId, importPath: resolved.relativePath, mode: input.mode, transcode }
+      });
+
+      req.log.info({ mediaId: media.id, importPath: resolved.relativePath }, "Completed server media import");
+      return reply.code(201).send({ media, upload: { objectKey, mode: input.mode }, queued: registered.queued, metadata });
+    } catch (error) {
+      req.log.error({ err: error, importPath: resolved.relativePath, mediaId }, "Server media import failed");
+      if (mediaId) {
+        await prisma.media.update({ where: { id: mediaId }, data: { status: "failed" } }).catch(() => undefined);
+      }
+      const message = error instanceof Error ? error.message : "server_import_failed";
+      if (message.includes("timed out") || message.includes("timeout")) return reply.code(504).send({ error: "server_import_timeout" });
+      return reply.code(500).send({ error: "server_import_failed" });
+    }
   });
 }
 

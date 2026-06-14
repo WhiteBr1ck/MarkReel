@@ -1,9 +1,5 @@
 import type { FastifyRequest } from "fastify";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import { putObjectStream } from "./s3";
 
 function isReadable(value: unknown): value is Readable {
@@ -36,25 +32,18 @@ export async function putRequestBodyObject(args: {
   objectKey: string;
   contentType?: string | string[];
 }) {
-  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "markreel-upload-"));
-  const tempFile = path.join(tempDir, "body");
   const source = isReadable(args.req.body) ? args.req.body : args.req.raw;
 
   try {
-    await pipeline(source, fs.createWriteStream(tempFile));
-    const stat = await fs.promises.stat(tempFile);
-
     await putObjectStream({
       bucket: args.bucket,
       objectKey: args.objectKey,
-      body: fs.createReadStream(tempFile),
+      body: source,
       contentType: Array.isArray(args.contentType) ? args.contentType[0] : args.contentType,
-      contentLength: stat.size
+      contentLength: typeof args.req.headers["content-length"] === "string" ? Number(args.req.headers["content-length"]) : undefined
     });
   } catch (error) {
     if (isUploadAbortError(error)) throw uploadAbortedError(error);
     throw error;
-  } finally {
-    await fs.promises.rm(tempDir, { recursive: true, force: true });
   }
 }

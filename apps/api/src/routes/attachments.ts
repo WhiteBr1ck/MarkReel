@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { nanoid } from "nanoid";
 import { env } from "../env";
+import { presignPutObject } from "../s3";
 import { putRequestBodyObject } from "../uploadProxy";
 import { getUserId, requireUser } from "../auth/requireUser";
 import { auditLog } from "../audit";
@@ -21,7 +22,13 @@ export async function attachmentRoutes(app: FastifyInstance) {
     const objectKey = input.filename.startsWith("markup-")
       ? `attachments/markup/${nanoid(18)}.${ext}`
       : `attachments/${nanoid(18)}.${ext}`;
-    const url = `/api/attachments/upload/file?objectKey=${encodeURIComponent(objectKey)}`;
+    const url = await presignPutObject({
+      bucket: env.S3_BUCKET_ATTACHMENTS,
+      objectKey,
+      contentType: input.contentType,
+      req
+    });
+    const proxyUrl = `/api/attachments/upload/file?objectKey=${encodeURIComponent(objectKey)}`;
 
     await auditLog({
       req,
@@ -36,6 +43,7 @@ export async function attachmentRoutes(app: FastifyInstance) {
       upload: {
         method: "PUT",
         url,
+        proxyUrl,
         objectKey,
         bucket: env.S3_BUCKET_ATTACHMENTS
       }

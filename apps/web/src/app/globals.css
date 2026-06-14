@@ -303,6 +303,10 @@ html[data-theme="light"] .mr-input {
   width: min(1040px, calc(100vw - 48px));
 }
 
+.mr-dialog:has(.mr-upload-dialog) {
+  max-height: calc(100dvh - 24px);
+}
+
 html[data-theme="light"] .mr-dialog {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(250, 249, 245, 0.98));
 }
@@ -395,6 +399,7 @@ html[data-theme="light"] .mr-dialog {
 .mr-upload-dialog {
   display: grid;
   gap: 16px;
+  padding-bottom: 18px;
 }
 
 .mr-upload-dialog__grid {
@@ -416,6 +421,11 @@ html[data-theme="light"] .mr-dialog {
 .mr-upload-dialog__menu {
   position: relative;
   width: 100%;
+  z-index: 1;
+}
+
+.mr-upload-dialog__menu:has(.mr-upload-dialog__menu-popover) {
+  z-index: 90;
 }
 
 .mr-upload-dialog__menu-trigger {
@@ -433,12 +443,12 @@ html[data-theme="light"] .mr-dialog {
 .mr-upload-dialog__menu-popover {
   position: absolute;
   left: 0;
-  top: calc(100% + 8px);
+  bottom: calc(100% + 8px);
   width: 100%;
   max-height: 220px;
   overflow-y: auto;
   padding: 8px;
-  z-index: 80;
+  z-index: 100;
   box-shadow: var(--shadow);
 }
 
@@ -4805,12 +4815,11 @@ html[data-theme="light"] .mr-player-page__annotation-replies {
 }
 
 .mr-shell__uploads {
-  padding: 14px 18px 14px;
-  border-bottom: 1px solid var(--border2);
+  min-width: 0;
 }
 
 .mr-shell__uploads-card {
-  padding: 14px;
+  padding: 12px;
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 8%, var(--border)), var(--whisper-shadow);
   background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 6%, transparent), transparent 48%), var(--surface-soft);
 }
@@ -4820,7 +4829,7 @@ html[data-theme="light"] .mr-player-page__annotation-replies {
   justify-content: space-between;
   gap: 12px;
   align-items: center;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
   flex-wrap: wrap;
 }
 
@@ -4834,7 +4843,7 @@ html[data-theme="light"] .mr-player-page__annotation-replies {
 .mr-shell__uploads-subtitle {
   margin-top: 3px;
   font-family: var(--font-display);
-  font-size: 24px;
+  font-size: 18px;
   line-height: 1.1;
 }
 
@@ -4844,15 +4853,31 @@ html[data-theme="light"] .mr-player-page__annotation-replies {
   flex-wrap: wrap;
 }
 
+.mr-shell__uploads-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mr-shell__uploads-card--collapsed .mr-shell__uploads-head {
+  margin-bottom: 8px;
+}
+
 .mr-shell__upload-list {
+  margin-top: 10px;
   display: grid;
   gap: 10px;
+  max-height: min(48vh, 520px);
+  overflow: auto;
 }
 
 .mr-shell__upload-item {
   border: 1px solid var(--border2);
-  border-radius: 16px;
-  padding: 12px;
+  border-radius: 8px;
+  padding: 10px;
   background: var(--surface-soft);
 }
 
@@ -4864,6 +4889,10 @@ html[data-theme="light"] .mr-player-page__annotation-replies {
 .mr-shell__upload-item--error {
   border-color: color-mix(in srgb, var(--danger) 26%, var(--border));
   background: linear-gradient(180deg, color-mix(in srgb, var(--danger) 8%, var(--surface-1)), color-mix(in srgb, var(--danger) 3%, var(--surface-2)));
+}
+
+.mr-shell__upload-item--cancelled {
+  opacity: 0.78;
 }
 
 .mr-shell__upload-row {
@@ -4893,6 +4922,28 @@ html[data-theme="light"] .mr-player-page__annotation-replies {
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.mr-shell__upload-transfer {
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--muted2);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mr-shell__upload-transfer span:not(:first-child)::before {
+  content: "";
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.45;
+  margin-right: 8px;
+  vertical-align: middle;
 }
 
 .mr-shell__upload-error {
