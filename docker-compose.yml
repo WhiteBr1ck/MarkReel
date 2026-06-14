@@ -67,7 +67,8 @@ services:
     volumes:
       - sqlite-data:/app/data
       # Optional: add host media libraries as sibling folders under /imports.
-      - C:/Users/YOU/Desktop:/imports/Desktop:ro
+      # - D:/Videos:/imports/Videos:ro
+      # - /mnt/nas/videos:/imports/NAS:ro
 
   worker:
     build:
