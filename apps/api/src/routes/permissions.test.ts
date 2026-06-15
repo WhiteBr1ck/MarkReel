@@ -112,6 +112,7 @@ async function setupSchema(prisma: Awaited<typeof dbModule>["prisma"]) {
     "mediaId" TEXT NOT NULL,
     "originalObjectKey" TEXT NOT NULL,
     "derivedPrefix" TEXT,
+    "thumbnailObjectKey" TEXT,
     "mode" TEXT NOT NULL,
     "durationMs" INTEGER,
     "width" INTEGER,

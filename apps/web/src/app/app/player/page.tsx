@@ -35,7 +35,7 @@ import {
   IconVolumeOff,
   type IconProps
 } from "@tabler/icons-react";
-import type { ChangeEvent, ClipboardEvent, PointerEvent as ReactPointerEvent, ReactNode, WheelEvent } from "react";
+import type { CSSProperties, ChangeEvent, ClipboardEvent, PointerEvent as ReactPointerEvent, ReactNode, WheelEvent } from "react";
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Dialog } from "../_components/dialog";
@@ -984,6 +984,7 @@ function PlayerPageInner() {
     }
     return `${formatClock(currentTime)}/${formatClock(duration)}`;
   }, [currentFrame, currentTime, duration, primaryFile?.frameCount, timeDisplayMode]);
+  const timelineProgress = duration > 0 ? clamp((currentTime / duration) * 100, 0, 100) : 0;
 
   useEffect(() => {
     const canvas = markupCanvasRef.current;
@@ -1012,13 +1013,14 @@ function PlayerPageInner() {
   }
 
   function revealUi() {
-    if (!isFullscreen || markupEditorOpen) return;
+    if (markupEditorOpen) return;
     setShowUi(true);
+    if (!isFullscreen) return;
     scheduleUiHide();
   }
 
   function keepUiVisible() {
-    if (!isFullscreen || markupEditorOpen) return;
+    if (markupEditorOpen) return;
     clearUiHideTimer();
     setShowUi(true);
   }
@@ -1163,7 +1165,7 @@ function PlayerPageInner() {
   }
 
   function cancelMarkupEditor() {
-    setMarkupEditorOpen(false);
+    closeMarkupEditor();
     resetMarkupDraft();
   }
 
@@ -1814,11 +1816,12 @@ function PlayerPageInner() {
             </div>
           </div>
 
-          <div
-            className={`mr-player-page__video-shell${isFullscreen ? " mr-player-page__video-shell--fullscreen" : ""}${showUi ? " mr-player-page__video-shell--ui" : " mr-player-page__video-shell--ui-hidden"}${markupEditorOpen ? " mr-player-page__video-shell--markup" : ""}`}
-            ref={videoShellRef}
-            onMouseLeave={() => !pinUi && isFullscreen && hideUiNow()}
-          >
+          <div className="mr-player-page__media-stack">
+            <div
+              className={`mr-player-page__video-shell${isFullscreen ? " mr-player-page__video-shell--fullscreen" : ""}${showUi ? " mr-player-page__video-shell--ui" : " mr-player-page__video-shell--ui-hidden"}${markupEditorOpen ? " mr-player-page__video-shell--markup" : ""}`}
+              ref={videoShellRef}
+              onMouseLeave={() => !pinUi && isFullscreen && hideUiNow()}
+            >
             <div
               className={`mr-player-page__video-surface${showUi ? "" : " mr-player-page__video-surface--ui-hidden"}`}
               onMouseMove={revealUi}
@@ -1900,6 +1903,7 @@ function PlayerPageInner() {
                     max={Math.max(duration, 0.001)}
                     step="0.01"
                     value={Math.min(currentTime, duration || currentTime)}
+                    style={{ "--timeline-progress": `${timelineProgress}%` } as CSSProperties}
                     onMouseMove={handleTimelinePointer}
                     onMouseLeave={() => setHoverTime(null)}
                     onChange={(event) => seekTo(Number(event.target.value))}
@@ -1988,56 +1992,11 @@ function PlayerPageInner() {
               </div>
               </div>
             ) : null}
+            </div>
+
           </div>
 
-          {markupEditorOpen && canAnnotate ? (
-            <div className="mr-panel mr-player-page__markup-toolbar" onClick={(event) => event.stopPropagation()}>
-              <div className="mr-player-page__markup-tools">
-                {([
-                  ["brush", "画笔"],
-                  ["text", "文字"],
-                  ["rect", "方框"],
-                  ["circle", "圆形"]
-                ] as Array<[MarkupTool, string]>).map(([tool, label]) => (
-                  <button
-                    key={tool}
-                    className={`mr-btn mr-btn--surface mr-player-page__markup-tool${markupTool === tool ? " mr-player-page__tab--active" : ""}`}
-                    type="button"
-                    onClick={() => setMarkupTool(tool)}
-                    title={label}
-                  >
-                    <PlayerIcon icon={markupToolIcon(tool)} />
-                    <span>{label}</span>
-                  </button>
-                ))}
-              </div>
-              <div className="mr-player-page__swatches">
-                {COLOR_PRESETS.map((swatch) => (
-                  <button
-                    key={swatch}
-                    type="button"
-                    className={`mr-player-page__swatch${markupColor === swatch ? " mr-player-page__swatch--active" : ""}`}
-                    style={{ background: swatch }}
-                    onClick={() => setMarkupColor(swatch)}
-                    aria-label={`画笔颜色 ${swatch}`}
-                  />
-                ))}
-              </div>
-              <label className="mr-player-page__markup-width">
-                <span>粗细 {markupWidth}</span>
-                <input type="range" min="2" max="18" value={markupWidth} onChange={(event) => setMarkupWidth(Number(event.target.value))} />
-              </label>
-              <label className="mr-player-page__markup-width">
-                <span>透明 {Math.round(markupOpacity * 100)}%</span>
-                <input type="range" min="0.15" max="1" step="0.05" value={markupOpacity} onChange={(event) => setMarkupOpacity(Number(event.target.value))} />
-              </label>
-              <button className="mr-btn" type="button" onClick={() => setMarkupOperations((prev) => prev.slice(0, -1))} disabled={markupOperations.length === 0 || markupSaving}>撤销</button>
-              <button className="mr-btn" type="button" onClick={resetMarkupDraft} disabled={markupOperations.length === 0 || markupSaving}>清空</button>
-              <button className="mr-btn" type="button" onClick={cancelMarkupEditor} disabled={markupSaving}>取消</button>
-            </div>
-          ) : null}
-
-          {canAnnotate ? <section className={`mr-panel mr-player-page__composer${annotationEditorFullscreen ? " mr-player-page__composer--fullscreen" : ""}`}>
+          {canAnnotate ? <section className={`mr-panel mr-player-page__composer${annotationEditorFullscreen ? " mr-player-page__composer--fullscreen" : ""}${markupEditorOpen ? " mr-player-page__composer--markup" : ""}`}>
             <div className="mr-player-page__section-head">
               <div>
                 <div className="mr-player-page__section-kicker">标注输入</div>
@@ -2055,6 +2014,53 @@ function PlayerPageInner() {
                 </button>
               </div>
             </div>
+
+            {markupEditorOpen ? (
+              <div className="mr-player-page__markup-toolbar" onClick={(event) => event.stopPropagation()}>
+                <div className="mr-player-page__markup-tools">
+                  {([
+                    ["brush", "画笔"],
+                    ["text", "文字"],
+                    ["rect", "方框"],
+                    ["circle", "圆形"]
+                  ] as Array<[MarkupTool, string]>).map(([tool, label]) => (
+                    <button
+                      key={tool}
+                      className={`mr-btn mr-btn--surface mr-player-page__markup-tool${markupTool === tool ? " mr-player-page__tab--active" : ""}`}
+                      type="button"
+                      onClick={() => setMarkupTool(tool)}
+                      title={label}
+                    >
+                      <PlayerIcon icon={markupToolIcon(tool)} />
+                      <span>{label}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="mr-player-page__swatches">
+                  {COLOR_PRESETS.map((swatch) => (
+                    <button
+                      key={swatch}
+                      type="button"
+                      className={`mr-player-page__swatch${markupColor === swatch ? " mr-player-page__swatch--active" : ""}`}
+                      style={{ background: swatch }}
+                      onClick={() => setMarkupColor(swatch)}
+                      aria-label={`画笔颜色 ${swatch}`}
+                    />
+                  ))}
+                </div>
+                <label className="mr-player-page__markup-width">
+                  <span>粗细 {markupWidth}</span>
+                  <input type="range" min="2" max="18" value={markupWidth} onChange={(event) => setMarkupWidth(Number(event.target.value))} />
+                </label>
+                <label className="mr-player-page__markup-width">
+                  <span>透明 {Math.round(markupOpacity * 100)}%</span>
+                  <input type="range" min="0.15" max="1" step="0.05" value={markupOpacity} onChange={(event) => setMarkupOpacity(Number(event.target.value))} />
+                </label>
+                <button className="mr-btn" type="button" onClick={() => setMarkupOperations((prev) => prev.slice(0, -1))} disabled={markupOperations.length === 0 || markupSaving}>撤销</button>
+                <button className="mr-btn" type="button" onClick={resetMarkupDraft} disabled={markupOperations.length === 0 || markupSaving}>清空</button>
+                <button className="mr-btn" type="button" onClick={cancelMarkupEditor} disabled={markupSaving}>取消</button>
+              </div>
+            ) : null}
 
             <div className="mr-player-page__editor-shell" onPaste={(event) => void handleEditorPaste(event, "composer")}>
               <textarea
@@ -2183,7 +2189,7 @@ function PlayerPageInner() {
             </div>
           ) : (
             <div className="mr-panel mr-player-page__sidebar-card mr-player-page__sidebar-card--scroll">
-              <div className="mr-player-page__section-head">
+              <div className="mr-player-page__section-head mr-player-page__annotation-panel-head">
                 <div>
                   <div className="mr-player-page__section-kicker">标注队列</div>
                   <h2 className="mr-player-page__section-title">时间顺序</h2>
@@ -2198,12 +2204,13 @@ function PlayerPageInner() {
                 </div>
               </div>
 
-              {annotationLoading ? (
-                <div className="mr-player-page__empty">正在加载标注…</div>
-              ) : annotations.length === 0 ? (
-                <div className="mr-player-page__empty">还没有标注，先创建第一条。</div>
-              ) : (
-                <div className="mr-player-page__annotation-list">
+              <div className="mr-player-page__annotation-scroll-body">
+                {annotationLoading ? (
+                  <div className="mr-player-page__empty">正在加载标注…</div>
+                ) : annotations.length === 0 ? (
+                  <div className="mr-player-page__empty">还没有标注，先创建第一条。</div>
+                ) : (
+                  <div className="mr-player-page__annotation-list">
                   {annotations.map((annotation, annotationIndex) => {
                     const displayName = annotation.author?.displayName ?? annotation.author?.username ?? "未知用户";
                     const isEditing = draftMode === "edit" && draftTargetId === annotation.id;
@@ -2214,7 +2221,7 @@ function PlayerPageInner() {
                         <div className="mr-player-page__annotation-main">
                           <div className="mr-player-page__annotation-card-head">
                             <button type="button" className="mr-player-page__annotation-anchor" onClick={() => selectAnnotation(annotation)}>
-                              <span className="mr-player-page__annotation-timecode" style={{ borderColor: annotation.color || COLOR_PRESETS[0] }}>
+                              <span className="mr-player-page__annotation-timecode" style={{ "--annotation-color": annotation.color || COLOR_PRESETS[0] } as CSSProperties}>
                                 <span className="mr-player-page__annotation-order" aria-hidden="true">{annotationNumber}</span>
                                 <strong>{formatClock(annotation.timestampMs / 1000)}</strong>
                               </span>
@@ -2525,8 +2532,9 @@ function PlayerPageInner() {
                       </article>
                     );
                   })}
-                </div>
-              )}
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </aside>

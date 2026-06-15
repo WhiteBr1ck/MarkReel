@@ -52,12 +52,10 @@ export default function AboutPage() {
 
           <section className="mr-panel mr-page__card">
             <div className="mr-page__section-kicker">Repository</div>
-            <h2 className="mr-page__section-title">GitHub</h2>
-            <p className="mr-page__note">
-              <a href={repositoryUrl} target="_blank" rel="noreferrer">
-                {repositoryUrl}
-              </a>
-            </p>
+            <a className="mr-about-card__repo-link" href={repositoryUrl} target="_blank" rel="noreferrer">
+              <span className="mr-page__section-title">MarkReel</span>
+              <span>WhiteBr1ck · GitHub Repository</span>
+            </a>
           </section>
         </div>
 

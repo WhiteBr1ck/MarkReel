@@ -71,6 +71,13 @@ type PreviewResponse = {
   };
 };
 
+type ThumbnailResponse = {
+  thumbnail: {
+    url: string;
+    mediaId: string;
+  };
+};
+
 type MediaStatusResponse = {
   media: {
     id: string;
@@ -690,15 +697,7 @@ function VideoCardPreview({ name, previewUrl }: VideoCardPreviewProps) {
     );
   }
 
-  return (
-    <video
-      src={previewUrl}
-      muted
-      playsInline
-      preload="metadata"
-      style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000" }}
-    />
-  );
+  return <img src={previewUrl} alt="" loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000" }} />;
 }
 
 type DialogState =
@@ -730,7 +729,7 @@ export default function AppClient() {
   const [serverImportError, setServerImportError] = useState<string | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>(() => readStoredUploadQueue());
   const uploadAborters = useRef(new Map<string, AbortController>());
-  const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
+  const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({});
   const [previewBusy, setPreviewBusy] = useState(false);
   const [feedback, setFeedback] = useState<FeedbackState | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -871,7 +870,7 @@ export default function AppClient() {
     setDialog(null);
     setUploadDraft(null);
     setUploadQueue(() => []);
-    setPreviewUrls({});
+    setThumbnailUrls({});
     setPreviewBusy(false);
     setFeedback(null);
     setContextMenu(null);
@@ -1341,22 +1340,22 @@ export default function AppClient() {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
-  async function cachePreviewUrl(mediaId: string) {
-    if (previewUrls[mediaId]) return previewUrls[mediaId];
-    const data = await api<PreviewResponse>(`/media/${mediaId}/preview`);
-    setPreviewUrls((prev) => ({ ...prev, [mediaId]: data.preview.url }));
-    return data.preview.url;
+  async function cacheThumbnailUrl(mediaId: string) {
+    if (thumbnailUrls[mediaId]) return thumbnailUrls[mediaId];
+    const data = await api<ThumbnailResponse>(`/media/${mediaId}/thumbnail`);
+    setThumbnailUrls((prev) => ({ ...prev, [mediaId]: data.thumbnail.url }));
+    return data.thumbnail.url;
   }
 
-  async function warmPreviewUrls(itemsToWarm: WorkspaceItem[]) {
+  async function warmThumbnailUrls(itemsToWarm: WorkspaceItem[]) {
     const targets = itemsToWarm.filter((item): item is Extract<WorkspaceItem, { kind: "video" }> => item.kind === "video");
     if (targets.length === 0) return;
 
     const nextEntries = await Promise.all(
       targets.map(async (item) => {
-        if (previewUrls[item.id]) return null;
+        if (item.thumbnailUrl || thumbnailUrls[item.id]) return null;
         try {
-          const url = await cachePreviewUrl(item.id);
+          const url = await cacheThumbnailUrl(item.id);
           return [item.id, url] as const;
         } catch {
           return null;
@@ -1366,7 +1365,7 @@ export default function AppClient() {
 
     const readyEntries = nextEntries.filter((entry): entry is readonly [string, string] => !!entry);
     if (readyEntries.length === 0) return;
-    setPreviewUrls((prev) => ({ ...prev, ...Object.fromEntries(readyEntries) }));
+    setThumbnailUrls((prev) => ({ ...prev, ...Object.fromEntries(readyEntries) }));
   }
 
   async function markUploadReady(id: string, mediaId: string) {
@@ -1406,8 +1405,7 @@ export default function AppClient() {
           });
         }
 
-        const preview = await api<PreviewResponse>(`/media/${mediaId}/preview`);
-        setPreviewUrls((prev) => ({ ...prev, [mediaId]: preview.preview.url }));
+        await api<PreviewResponse>(`/media/${mediaId}/preview`);
         setUploadReady(id, mediaId);
         await refreshWorkspace();
         return true;
@@ -1669,12 +1667,11 @@ export default function AppClient() {
     setErr(null);
     setPreviewBusy(true);
     try {
-      const data = await api<PreviewResponse>(`/media/${item.id}/preview`);
+      await api<PreviewResponse>(`/media/${item.id}/preview`);
       setUploadQueue((prev) => prev.map((upload) => (upload.mediaId === item.id ? { ...upload, stage: "ready", progress: 100, error: undefined, actionLabel: "可预览" } : upload)));
       localStorage.setItem("mr_last_workbench_url", `${pathname}?${sp.toString()}` || pathname);
       router.push(`/app/player?mid=${encodeURIComponent(item.id)}`);
       showFeedback("success", `已打开 ${item.name}`);
-      setPreviewUrls((prev) => ({ ...prev, [item.id]: data.preview.url }));
     } catch (e: any) {
       const code = e?.data?.error;
       const message = code === "preview_not_ready" ? "该视频还在处理中，暂时还不能预览。" : toZhError(e);
@@ -1703,13 +1700,12 @@ export default function AppClient() {
     setErr(null);
     setPreviewBusy(true);
     try {
-      const data = await api<PreviewResponse>(`/media/${mediaId}/preview`);
+      await api<PreviewResponse>(`/media/${mediaId}/preview`);
       const title = uploads.find((upload) => upload.mediaId === mediaId)?.fileName ?? "预览";
       setUploadQueue((prev) => prev.map((upload) => (upload.mediaId === mediaId ? { ...upload, stage: "ready", progress: 100, error: undefined, actionLabel: "可预览" } : upload)));
       localStorage.setItem("mr_last_workbench_url", `${pathname}?${sp.toString()}` || pathname);
       router.push(`/app/player?mid=${encodeURIComponent(mediaId)}`);
       showFeedback("success", `已打开 ${title}`);
-      setPreviewUrls((prev) => ({ ...prev, [mediaId]: data.preview.url }));
     } catch (e: any) {
       const code = e?.data?.error;
       const message = code === "preview_not_ready" ? "该视频还在处理中，暂时还不能预览。" : toZhError(e);
@@ -2214,7 +2210,7 @@ export default function AppClient() {
 
   useEffect(() => {
     const visibleVideos = items.slice(0, view === "grid" ? 8 : 4);
-    void warmPreviewUrls(visibleVideos);
+    void warmThumbnailUrls(visibleVideos);
   }, [items, view]);
 
   const folderTree = workspace?.folderTree ?? null;
@@ -3470,7 +3466,7 @@ export default function AppClient() {
                             <div
                               className={`mr-card-button__preview${it.kind === "folder" ? " mr-card-button__preview--folder" : " mr-card-button__preview--video"}`}
                             >
-                              {it.kind === "folder" ? <IconFolder size={22} /> : <VideoCardPreview name={it.name} previewUrl={previewUrls[it.id]} />}
+                              {it.kind === "folder" ? <IconFolder size={22} /> : <VideoCardPreview name={it.name} previewUrl={it.thumbnailUrl ?? thumbnailUrls[it.id]} />}
                               {scope === "workspace" && selectionMode ? (
                                 <span style={{ position: "absolute", top: 8, left: 8 }}>
                                   <input

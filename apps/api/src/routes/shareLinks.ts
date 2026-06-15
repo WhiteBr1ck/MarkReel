@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../db";
 import { getStore } from "../store";
@@ -228,16 +229,16 @@ const shareAnnotationReplySelect = {
       annotationId: true
     }
   }
-} as const;
+} satisfies Prisma.AnnotationSelect;
 
-const shareAnnotationSelect = {
+const shareAnnotationSelect: Prisma.AnnotationSelect = {
   ...shareAnnotationReplySelect,
   replies: {
     where: { deletedAt: null },
     orderBy: [{ timestampMs: "asc" }, { createdAt: "asc" }],
     select: shareAnnotationReplySelect
   }
-} as const;
+};
 
 async function sendSharedObject(reply: any, target: { bucket: string; objectKey: string }, range?: string) {
   const initialObject = await getObjectStream(target);
@@ -356,7 +357,8 @@ async function requireActiveMediaShare(token: string, reply: any) {
     }
   });
 
-  if (!link || !link.mediaId || !link.media || link.media.deletedAt) {
+  const media = link?.media ?? null;
+  if (!link || !link.mediaId || !media || media.deletedAt) {
     reply.code(404).send({ error: "not_found" });
     return null;
   }
@@ -383,7 +385,7 @@ async function requireActiveMediaShare(token: string, reply: any) {
     return null;
   }
 
-  return { ...link, serializedPermissions: permissions };
+  return { ...link, media, serializedPermissions: permissions };
 }
 
 function canShareAnnotate(permissions: SerializedPermission[]) {

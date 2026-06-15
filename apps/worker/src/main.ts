@@ -127,17 +127,39 @@ async function downloadObjectToFile(bucket: string, objectKey: string, destinati
   await pipeline(body as NodeJS.ReadableStream, createWriteStream(destinationPath));
 }
 
-async function uploadFileToObjectStorage(bucket: string, objectKey: string, filePath: string) {
+async function uploadFileToObjectStorage(bucket: string, objectKey: string, filePath: string, contentType = "video/mp4") {
   const fileStat = await stat(filePath);
   await s3.send(
     new PutObjectCommand({
       Bucket: bucket,
       Key: objectKey,
       Body: createReadStream(filePath),
-      ContentType: "video/mp4",
+      ContentType: contentType,
       ContentLength: fileStat.size
     })
   );
+}
+
+function thumbnailSeekSeconds(durationMs?: number) {
+  if (!durationMs || durationMs <= 0) return 1;
+  return Math.max(0.1, Math.min(3, durationMs / 10000));
+}
+
+async function generateThumbnail(inputPath: string, outputPath: string, durationMs?: number) {
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-ss",
+    String(thumbnailSeekSeconds(durationMs)),
+    "-i",
+    inputPath,
+    "-frames:v",
+    "1",
+    "-vf",
+    "scale=480:-2:force_original_aspect_ratio=decrease",
+    "-q:v",
+    "5",
+    outputPath
+  ]);
 }
 
 function buildFfmpegFilters(transcode?: MediaTranscode) {
@@ -187,7 +209,9 @@ async function processCompressJob(job: Job<MediaJob>) {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "markreel-worker-"));
   const inputPath = path.join(tempDir, "input-source");
   const outputPath = path.join(tempDir, "preview.mp4");
+  const thumbnailPath = path.join(tempDir, "thumbnail.jpg");
   const derivedObjectKey = `derived/${payload.mediaId}/${Date.now()}-${payload.originalObjectKey.split("/").pop() ?? "preview"}.mp4`;
+  const thumbnailObjectKey = `derived/${payload.mediaId}/thumbnail-${Date.now()}.jpg`;
 
   try {
     await prisma.media.update({
@@ -205,6 +229,14 @@ async function processCompressJob(job: Job<MediaJob>) {
     await uploadFileToObjectStorage(env.S3_BUCKET_DERIVED, derivedObjectKey, outputPath);
 
     const metadata = await readLocalMediaMetadata(outputPath);
+    let savedThumbnailObjectKey: string | null = null;
+    try {
+      await generateThumbnail(outputPath, thumbnailPath, metadata.durationMs);
+      await uploadFileToObjectStorage(env.S3_BUCKET_DERIVED, thumbnailObjectKey, thumbnailPath, "image/jpeg");
+      savedThumbnailObjectKey = thumbnailObjectKey;
+    } catch (error) {
+      console.warn("thumbnail generation failed", payload.mediaId, error);
+    }
 
     await prisma.mediaFile.update({
       where: {
@@ -215,6 +247,7 @@ async function processCompressJob(job: Job<MediaJob>) {
       },
       data: {
         derivedPrefix: derivedObjectKey,
+        thumbnailObjectKey: savedThumbnailObjectKey,
         durationMs: metadata.durationMs,
         width: metadata.width,
         height: metadata.height,

@@ -257,6 +257,7 @@ model MediaFile {
   mediaId           String
   originalObjectKey String
   derivedPrefix     String?
+  thumbnailObjectKey String?
   mode              String   // original|compress (MVP)
   durationMs        Int?
   width             Int?

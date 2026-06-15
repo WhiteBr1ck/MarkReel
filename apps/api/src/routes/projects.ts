@@ -212,7 +212,8 @@ export async function projectRoutes(app: FastifyInstance) {
               sizeBytes: true,
               bitrateKbps: true,
               frameCount: true,
-              originalObjectKey: true
+              originalObjectKey: true,
+              thumbnailObjectKey: true
             },
             orderBy: { createdAt: "desc" },
             take: 1
@@ -242,6 +243,7 @@ export async function projectRoutes(app: FastifyInstance) {
         height: item.files[0]?.height ?? undefined,
         frameCount: item.files[0]?.frameCount ?? undefined,
         bitrateKbps: item.files[0]?.bitrateKbps ?? undefined,
+        thumbnailUrl: item.files[0]?.thumbnailObjectKey ? `/api/media/${item.id}/thumbnail/file` : null,
         status: item.status
       }))
     ];

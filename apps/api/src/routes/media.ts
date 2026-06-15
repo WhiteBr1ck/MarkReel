@@ -222,6 +222,75 @@ async function assertProjectAccess(userId: string, projectId: string, capability
   return access && hasCapability(access, capability) ? access : null;
 }
 
+function thumbnailSeekSeconds(durationMs?: number) {
+  if (!durationMs || durationMs <= 0) return 1;
+  return Math.max(0.1, Math.min(3, durationMs / 10000));
+}
+
+async function generateThumbnail(inputPath: string, outputPath: string, durationMs?: number) {
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-ss",
+    String(thumbnailSeekSeconds(durationMs)),
+    "-i",
+    inputPath,
+    "-frames:v",
+    "1",
+    "-vf",
+    "scale=480:-2:force_original_aspect_ratio=decrease",
+    "-q:v",
+    "5",
+    outputPath
+  ], { timeout: 30000, windowsHide: true });
+}
+
+async function createAndUploadThumbnail(args: { mediaId: string; sourcePath: string; durationMs?: number }) {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "markreel-thumb-"));
+  const thumbnailPath = path.join(tempDir, "thumbnail.jpg");
+  const objectKey = `derived/${args.mediaId}/thumbnail-${Date.now()}.jpg`;
+
+  try {
+    await generateThumbnail(args.sourcePath, thumbnailPath, args.durationMs);
+    await putObjectStream({
+      bucket: env.S3_BUCKET_DERIVED,
+      objectKey,
+      body: createReadStream(thumbnailPath),
+      contentType: "image/jpeg"
+    });
+    return objectKey;
+  } catch {
+    return null;
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function readMediaMetadataAndThumbnail(objectKey: string, mediaId: string) {
+  const stat = await statObject({
+    bucket: env.S3_BUCKET_ORIGINAL,
+    objectKey
+  });
+
+  const object = await getObjectStream({
+    bucket: env.S3_BUCKET_ORIGINAL,
+    objectKey
+  });
+
+  if (!object.body) throw new Error(`Missing readable body for s3://${env.S3_BUCKET_ORIGINAL}/${objectKey}`);
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "markreel-api-"));
+  const inputPath = path.join(tempDir, "metadata-source");
+
+  try {
+    await pipeline(object.body, createWriteStream(inputPath));
+    const metadata = await readLocalMediaMetadata(inputPath, stat.sizeBytes);
+    const thumbnailObjectKey = await createAndUploadThumbnail({ mediaId, sourcePath: inputPath, durationMs: metadata.durationMs });
+    return { metadata, thumbnailObjectKey };
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 async function readLocalMediaMetadata(filePath: string, sizeBytes?: number) {
   const result = await execFileAsync("ffprobe", [
     "-v",
@@ -313,6 +382,7 @@ async function registerMediaFile(args: {
   objectKey: string;
   mode: "original" | "compress";
   metadata: Awaited<ReturnType<typeof readLocalMediaMetadata>>;
+  thumbnailObjectKey?: string | null;
   transcode?: z.infer<typeof TranscodeSchema>;
 }) {
   await prisma.mediaFile.upsert({
@@ -324,6 +394,7 @@ async function registerMediaFile(args: {
     },
     update: {
       derivedPrefix: null,
+      ...(args.thumbnailObjectKey ? { thumbnailObjectKey: args.thumbnailObjectKey } : {}),
       mode: args.mode,
       durationMs: args.metadata.durationMs,
       width: args.metadata.width,
@@ -336,6 +407,7 @@ async function registerMediaFile(args: {
       mediaId: args.mediaId,
       originalObjectKey: args.objectKey,
       derivedPrefix: null,
+      thumbnailObjectKey: args.thumbnailObjectKey ?? null,
       mode: args.mode,
       durationMs: args.metadata.durationMs,
       width: args.metadata.width,
@@ -455,6 +527,7 @@ function mediaSelect(userId: string) {
         id: true,
         originalObjectKey: true,
         derivedPrefix: true,
+        thumbnailObjectKey: true,
         mode: true,
         durationMs: true,
         width: true,
@@ -957,6 +1030,63 @@ export async function mediaRoutes(app: FastifyInstance) {
     return reply.send(initialObject.body);
   });
 
+  app.get("/media/:mediaId/thumbnail", { preHandler: requireUser }, async (req, reply) => {
+    const userId = getUserId(req);
+    const mediaId = (req.params as any).mediaId as string;
+    const access = await assertMediaAccess(userId, mediaId);
+    if (!access) return reply.code(404).send({ error: "not_found" });
+
+    const media = await prisma.media.findUnique({
+      where: { id: mediaId },
+      select: {
+        id: true,
+        files: {
+          select: { thumbnailObjectKey: true },
+          orderBy: { createdAt: "desc" },
+          take: 1
+        }
+      }
+    });
+
+    const objectKey = media?.files[0]?.thumbnailObjectKey;
+    if (!objectKey) return reply.code(404).send({ error: "thumbnail_not_ready" });
+
+    const url = `/api/media/${mediaId}/thumbnail/file`;
+    return reply.send({ thumbnail: { url, mediaId } });
+  });
+
+  app.get("/media/:mediaId/thumbnail/file", { preHandler: requireUser }, async (req, reply) => {
+    const userId = getUserId(req);
+    const mediaId = (req.params as any).mediaId as string;
+    const access = await assertMediaAccess(userId, mediaId);
+    if (!access) return reply.code(404).send({ error: "not_found" });
+
+    const media = await prisma.media.findUnique({
+      where: { id: mediaId },
+      select: {
+        id: true,
+        files: {
+          select: { thumbnailObjectKey: true },
+          orderBy: { createdAt: "desc" },
+          take: 1
+        }
+      }
+    });
+
+    const objectKey = media?.files[0]?.thumbnailObjectKey;
+    if (!objectKey) return reply.code(404).send({ error: "thumbnail_not_ready" });
+
+    const object = await getObjectStream({ bucket: env.S3_BUCKET_DERIVED, objectKey }).catch(() => null);
+    if (!object?.body) return reply.code(404).send({ error: "thumbnail_not_ready" });
+
+    reply.header("content-type", object.contentType ?? "image/jpeg");
+    reply.header("cache-control", "private, max-age=3600");
+    if (object.contentLength) reply.header("content-length", String(object.contentLength));
+    if (object.etag) reply.header("etag", object.etag);
+    if (object.lastModified) reply.header("last-modified", object.lastModified.toUTCString());
+    return reply.send(object.body);
+  });
+
   app.get("/media/:mediaId/processing-status", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
     const mediaId = (req.params as any).mediaId as string;
@@ -1121,12 +1251,15 @@ export async function mediaRoutes(app: FastifyInstance) {
     const input = EnqueueSchema.parse(req.body);
     const transcode = input.mode === "compress" ? input.transcode : undefined;
 
-    const metadata = await readMediaMetadata(input.originalObjectKey);
+    const prepared = input.mode === "original"
+      ? await readMediaMetadataAndThumbnail(input.originalObjectKey, mediaId)
+      : { metadata: await readMediaMetadata(input.originalObjectKey), thumbnailObjectKey: null };
     const registered = await registerMediaFile({
       mediaId,
       objectKey: input.originalObjectKey,
       mode: input.mode,
-      metadata,
+      metadata: prepared.metadata,
+      thumbnailObjectKey: prepared.thumbnailObjectKey,
       transcode
     });
 
@@ -1141,7 +1274,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       meta: { mode: input.mode, transcode }
     });
 
-    return reply.send({ ok: true, queued: registered.queued, metadata });
+    return reply.send({ ok: true, queued: registered.queued, metadata: prepared.metadata });
   });
 
   app.get("/server-import/browse", { preHandler: requireUser }, async (req, reply) => {
@@ -1239,7 +1372,10 @@ export async function mediaRoutes(app: FastifyInstance) {
         timeoutAfter(120000, "server_import_storage_timeout")
       ]);
 
-      const registered = await registerMediaFile({ mediaId: media.id, objectKey, mode: input.mode, metadata, transcode });
+      const thumbnailForMedia = input.mode === "original"
+        ? await createAndUploadThumbnail({ mediaId: media.id, sourcePath: resolved.absolutePath, durationMs: metadata.durationMs })
+        : null;
+      const registered = await registerMediaFile({ mediaId: media.id, objectKey, mode: input.mode, metadata, thumbnailObjectKey: thumbnailForMedia, transcode });
       if (registered.error) return reply.code(503).send({ error: registered.error });
 
       await auditLog({

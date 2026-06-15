@@ -61,6 +61,7 @@ export type WorkspaceItem =
       height?: number;
       frameCount?: number;
       bitrateKbps?: number;
+      thumbnailUrl?: string | null;
       status?: string;
     };
 
