@@ -123,6 +123,7 @@ type AttachmentPresignResponse = {
   upload: {
     method: "PUT";
     url: string;
+    proxyUrl?: string | null;
     objectKey: string;
     bucket: string;
   };
@@ -210,6 +211,10 @@ function uploadToPresignedUrl(url: string, file: File) {
     xhr.onerror = () => reject(new Error("upload_failed:network"));
     xhr.send(file);
   });
+}
+
+async function uploadAttachmentFile(upload: AttachmentPresignResponse["upload"], file: File) {
+  await uploadToPresignedUrl(upload.proxyUrl ?? upload.url, file);
 }
 
 function isInterruptedPlayError(error: unknown) {
@@ -1119,7 +1124,7 @@ function PlayerPageInner() {
       method: "POST",
       body: JSON.stringify({ filename: `markup-${file.name}`, contentType: file.type || "image/png" })
     });
-    await uploadToPresignedUrl(data.upload.url, file);
+    await uploadAttachmentFile(data.upload, file);
     return {
       kind: "image",
       objectKey: data.upload.objectKey,
@@ -1299,7 +1304,7 @@ function PlayerPageInner() {
             method: "POST",
             body: JSON.stringify({ filename: file.name, contentType: file.type || "application/octet-stream" })
           });
-          await uploadToPresignedUrl(data.upload.url, file);
+          await uploadAttachmentFile(data.upload, file);
           return {
             ...local[index],
             kind: "image" as const,

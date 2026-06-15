@@ -16,6 +16,7 @@ function sanitizeWorkbenchHref(value: string | null): string {
 }
 
 const features = ["项目与文件夹管理", "视频上传、处理与播放", "时间点标注、回复与附件", "组织、权限和分享链接"];
+const repositoryUrl = "https://github.com/WhiteBr1ck/MarkReel";
 
 export default function AboutPage() {
   const [backHref, setBackHref] = useState<string>("/app");
@@ -52,7 +53,11 @@ export default function AboutPage() {
           <section className="mr-panel mr-page__card">
             <div className="mr-page__section-kicker">Repository</div>
             <h2 className="mr-page__section-title">GitHub</h2>
-            <p className="mr-page__note">暂未配置公开仓库地址。</p>
+            <p className="mr-page__note">
+              <a href={repositoryUrl} target="_blank" rel="noreferrer">
+                {repositoryUrl}
+              </a>
+            </p>
           </section>
         </div>
 
