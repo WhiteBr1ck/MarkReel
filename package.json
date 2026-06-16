@@ -1,6 +1,6 @@
 {
   "name": "markreel",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Open-source self-hosted video review and annotation tool.",
   "private": true,
   "packageManager": "npm@10.9.3",

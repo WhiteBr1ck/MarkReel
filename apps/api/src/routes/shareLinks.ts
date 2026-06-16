@@ -10,7 +10,7 @@ import { hashPassword, verifyPassword } from "../auth/password";
 import { ACCESS_COOKIE, authInstanceId, parseAuthTokenPayload } from "../auth/tokens";
 import { newShareToken, sha256Hex } from "../share";
 import { env } from "../env";
-import { getObjectStream } from "../s3";
+import { sendObjectResponse } from "../objectResponse";
 import { putRequestBodyObject } from "../uploadProxy";
 
 const SharePermissionSchema = z.enum(["view", "comment", "annotate"]);
@@ -240,35 +240,6 @@ const shareAnnotationSelect: Prisma.AnnotationSelect = {
   }
 };
 
-async function sendSharedObject(reply: any, target: { bucket: string; objectKey: string }, range?: string) {
-  const initialObject = await getObjectStream(target);
-  if (!initialObject.body) return reply.code(404).send({ error: "not_found" });
-
-  if (range && initialObject.contentLength) {
-    initialObject.body.destroy();
-    const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-    if (!match) return reply.code(416).send();
-    const total = initialObject.contentLength;
-    const start = match[1] ? Number(match[1]) : 0;
-    const end = match[2] ? Number(match[2]) : total - 1;
-    if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= total) return reply.code(416).send();
-    const rangedObject = await getObjectStream({ ...target, range: `bytes=${start}-${Math.min(end, total - 1)}` });
-    if (!rangedObject.body) return reply.code(404).send({ error: "not_found" });
-    reply.code(206);
-    reply.header("content-range", `bytes ${start}-${Math.min(end, total - 1)}/${total}`);
-    reply.header("content-length", String(Math.min(end, total - 1) - start + 1));
-    reply.header("content-type", rangedObject.contentType ?? initialObject.contentType ?? "application/octet-stream");
-    reply.header("accept-ranges", "bytes");
-    return reply.send(rangedObject.body);
-  }
-
-  reply.header("content-type", initialObject.contentType ?? "application/octet-stream");
-  if (initialObject.contentLength) reply.header("content-length", String(initialObject.contentLength));
-  if (initialObject.etag) reply.header("etag", initialObject.etag);
-  if (initialObject.lastModified) reply.header("last-modified", initialObject.lastModified.toUTCString());
-  reply.header("accept-ranges", "bytes");
-  return reply.send(initialObject.body);
-}
 
 async function getPreviewTargetForSharedMedia(mediaId: string) {
   const media = await prisma.media.findUnique({
@@ -802,7 +773,7 @@ export async function shareLinkRoutes(app: FastifyInstance) {
     const result = await getPreviewTargetForSharedMedia(link.mediaId);
     if (!result) return reply.code(404).send({ error: "preview_not_ready" });
     if ("failed" in result) return reply.code(409).send({ error: "processing_failed" });
-    return sendSharedObject(reply, result.target, typeof req.headers.range === "string" ? req.headers.range : undefined);
+    return sendObjectResponse({ reply, target: result.target, kind: "video", range: typeof req.headers.range === "string" ? req.headers.range : undefined, notFoundError: "preview_not_ready" });
   });
 
   app.get("/share/:token/annotations", async (req, reply) => {
@@ -984,6 +955,7 @@ export async function shareLinkRoutes(app: FastifyInstance) {
     });
     if (!attachment) return reply.code(404).send({ error: "not_found" });
 
-    return sendSharedObject(reply, { bucket: env.S3_BUCKET_ATTACHMENTS, objectKey: attachment.objectKey }, typeof req.headers.range === "string" ? req.headers.range : undefined);
+    return sendObjectResponse({ reply, target: { bucket: env.S3_BUCKET_ATTACHMENTS, objectKey: attachment.objectKey }, kind: "attachment", range: typeof req.headers.range === "string" ? req.headers.range : undefined });
   });
 }
+

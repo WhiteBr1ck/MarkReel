@@ -12,6 +12,7 @@ import { promisify } from "node:util";
 import { prisma } from "../db";
 import { getUserId, requireUser } from "../auth/requireUser";
 import { presignGetObject, presignPutObject, statObject, getObjectStream, putObjectStream } from "../s3";
+import { sendObjectResponse } from "../objectResponse";
 import { putRequestBodyObject } from "../uploadProxy";
 import { env } from "../env";
 import { auditLog } from "../audit";
@@ -999,35 +1000,13 @@ export async function mediaRoutes(app: FastifyInstance) {
     if (!result) return reply.code(404).send({ error: "preview_not_ready" });
     if ("failed" in result) return reply.code(409).send({ error: "processing_failed" });
 
-    const range = req.headers.range;
-    const initialObject = await getObjectStream(result.target);
-    if (!initialObject.body) return reply.code(404).send({ error: "preview_not_ready" });
-
-    if (range && initialObject.contentLength) {
-      initialObject.body.destroy();
-      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-      if (!match) return reply.code(416).send();
-      const total = initialObject.contentLength;
-      const start = match[1] ? Number(match[1]) : 0;
-      const end = match[2] ? Number(match[2]) : total - 1;
-      if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= total) return reply.code(416).send();
-      const rangedObject = await getObjectStream({ ...result.target, range: `bytes=${start}-${Math.min(end, total - 1)}` });
-      if (!rangedObject.body) return reply.code(404).send({ error: "preview_not_ready" });
-      reply.code(206);
-      reply.header("content-range", `bytes ${start}-${Math.min(end, total - 1)}/${total}`);
-      reply.header("content-length", String(Math.min(end, total - 1) - start + 1));
-      reply.header("content-type", rangedObject.contentType ?? initialObject.contentType ?? "video/mp4");
-      reply.header("accept-ranges", "bytes");
-      return reply.send(rangedObject.body);
-    }
-
-    reply.header("content-type", initialObject.contentType ?? "video/mp4");
-    if (initialObject.contentLength) reply.header("content-length", String(initialObject.contentLength));
-    if (initialObject.etag) reply.header("etag", initialObject.etag);
-    if (initialObject.lastModified) reply.header("last-modified", initialObject.lastModified.toUTCString());
-    reply.header("accept-ranges", "bytes");
-
-    return reply.send(initialObject.body);
+    return sendObjectResponse({
+      reply,
+      target: result.target,
+      kind: "video",
+      range: typeof req.headers.range === "string" ? req.headers.range : undefined,
+      notFoundError: "preview_not_ready"
+    });
   });
 
   app.get("/media/:mediaId/thumbnail", { preHandler: requireUser }, async (req, reply) => {
