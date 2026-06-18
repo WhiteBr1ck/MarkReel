@@ -37,6 +37,39 @@ const PresignVideoSchema = z.object({
   mode: z.enum(["original", "compress"]).default("compress")
 });
 
+const SUPPORTED_VIDEO_EXTENSIONS = new Set(["mp4", "mov", "m4v", "webm", "mkv", "avi", "mts", "m2ts", "ts", "wmv", "flv", "mpeg", "mpg", "3gp", "3g2"]);
+const VIDEO_CONTENT_TYPE_BY_EXTENSION = new Map<string, string>([
+  ["mp4", "video/mp4"],
+  ["mov", "video/quicktime"],
+  ["m4v", "video/x-m4v"],
+  ["webm", "video/webm"],
+  ["mkv", "video/x-matroska"],
+  ["avi", "video/x-msvideo"],
+  ["mts", "video/mp2t"],
+  ["m2ts", "video/mp2t"],
+  ["ts", "video/mp2t"],
+  ["wmv", "video/x-ms-wmv"],
+  ["flv", "video/x-flv"],
+  ["mpeg", "video/mpeg"],
+  ["mpg", "video/mpeg"],
+  ["3gp", "video/3gpp"],
+  ["3g2", "video/3gpp2"]
+]);
+
+function videoExtension(fileName: string) {
+  return path.extname(fileName).replace(/^\./, "").toLowerCase();
+}
+
+function isSupportedVideoPath(fileName: string) {
+  return SUPPORTED_VIDEO_EXTENSIONS.has(videoExtension(fileName));
+}
+
+function inferVideoContentType(fileName: string, contentType?: string | null) {
+  const normalized = contentType?.trim().toLowerCase();
+  if (normalized?.startsWith("video/")) return normalized;
+  return VIDEO_CONTENT_TYPE_BY_EXTENSION.get(videoExtension(fileName)) ?? normalized ?? "application/octet-stream";
+}
+
 const TranscodeSchema = z.object({
   resolution: z.enum(["1080p", "720p"]).optional(),
   fps: z.union([z.literal("source"), z.literal(24), z.literal(25), z.literal(30), z.literal(60)]).optional()
@@ -1165,15 +1198,17 @@ export async function mediaRoutes(app: FastifyInstance) {
       if (!access) return reply.code(404).send({ error: "not_found" });
 
       const input = PresignVideoSchema.parse(req.body);
-      const ext = input.filename.includes(".")
-        ? input.filename.split(".").pop()!.slice(0, 10)
-        : "bin";
+      if (!isSupportedVideoPath(input.filename)) {
+        return reply.code(400).send({ error: "unsupported_video_format" });
+      }
+      const ext = videoExtension(input.filename).slice(0, 10) || "bin";
+      const contentType = inferVideoContentType(input.filename, input.contentType);
 
       const objectKey = `original/${mediaId}/${nanoid(16)}.${ext}`;
       const url = await presignPutObject({
         bucket: env.S3_BUCKET_ORIGINAL,
         objectKey,
-        contentType: input.contentType,
+        contentType,
         req
       });
       const proxyUrl = `/api/objects/${encodeURIComponent(env.S3_BUCKET_ORIGINAL)}/${encodeURIComponent(objectKey)}`;
@@ -1184,7 +1219,7 @@ export async function mediaRoutes(app: FastifyInstance) {
         action: "media.presign_upload",
         entityType: "Media",
         entityId: mediaId,
-        meta: { objectKey, contentType: input.contentType, mode: input.mode }
+        meta: { objectKey, contentType, mode: input.mode }
       });
 
       return reply.send({
@@ -1267,6 +1302,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       entries = await Promise.all(
         dirents
           .filter((entry) => !entry.name.startsWith("."))
+          .filter((entry) => entry.isDirectory() || (entry.isFile() && isSupportedVideoPath(entry.name)))
           .map(async (entry) => {
             const entryAbsolutePath = path.join(resolved.absolutePath, entry.name);
             const stat = await fs.stat(entryAbsolutePath);
@@ -1313,6 +1349,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: "import_path_not_found" });
     }
     if (!stat.isFile()) return reply.code(400).send({ error: "import_path_not_file" });
+    if (!isSupportedVideoPath(resolved.absolutePath)) return reply.code(400).send({ error: "unsupported_video_format" });
 
     let mediaId: string | undefined;
     try {
@@ -1346,7 +1383,8 @@ export async function mediaRoutes(app: FastifyInstance) {
           bucket: env.S3_BUCKET_ORIGINAL,
           objectKey,
           body: createReadStream(resolved.absolutePath),
-          contentLength: stat.size
+          contentLength: stat.size,
+          contentType: inferVideoContentType(resolved.absolutePath)
         }),
         timeoutAfter(120000, "server_import_storage_timeout")
       ]);

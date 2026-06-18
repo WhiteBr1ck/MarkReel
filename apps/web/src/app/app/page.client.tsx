@@ -11,6 +11,40 @@ import { IconChevron, IconFolder, IconSearch, IconSort, IconVideo } from "./_com
 import { useUiPreferences } from "./_components/theme";
 import { api } from "./_components/api";
 
+const VIDEO_FILE_EXTENSIONS = ["mp4", "mov", "m4v", "webm", "mkv", "avi", "mts", "m2ts", "ts", "wmv", "flv", "mpeg", "mpg", "3gp", "3g2"];
+const VIDEO_FILE_ACCEPT = ["video/*", ...VIDEO_FILE_EXTENSIONS.map((extension) => `.${extension}`)].join(",");
+const VIDEO_MIME_BY_EXTENSION: Record<string, string> = {
+  mp4: "video/mp4",
+  mov: "video/quicktime",
+  m4v: "video/x-m4v",
+  webm: "video/webm",
+  mkv: "video/x-matroska",
+  avi: "video/x-msvideo",
+  mts: "video/mp2t",
+  m2ts: "video/mp2t",
+  ts: "video/mp2t",
+  wmv: "video/x-ms-wmv",
+  flv: "video/x-flv",
+  mpeg: "video/mpeg",
+  mpg: "video/mpeg",
+  "3gp": "video/3gpp",
+  "3g2": "video/3gpp2"
+};
+
+function fileExtension(name: string) {
+  const ext = name.split(".").pop()?.trim().toLowerCase();
+  return ext && ext !== name.toLowerCase() ? ext : "";
+}
+
+function isSupportedVideoFile(file: File) {
+  return file.type.startsWith("video/") || VIDEO_FILE_EXTENSIONS.includes(fileExtension(file.name));
+}
+
+function resolveVideoContentType(file: File) {
+  if (file.type && file.type.startsWith("video/")) return file.type;
+  return VIDEO_MIME_BY_EXTENSION[fileExtension(file.name)] ?? "application/octet-stream";
+}
+
 type ApiUser = {
   id: string;
   username: string;
@@ -561,6 +595,7 @@ function toZhError(e: any): string {
     invalid_import_path: "服务器路径不在允许的导入目录内",
     import_path_not_found: "服务器路径不存在或无法访问",
     import_path_not_file: "请选择一个视频文件，而不是文件夹",
+    unsupported_video_format: "暂不支持这个视频格式，请选择 MP4、MOV、MKV、AVI、WEBM 等常见视频文件",
     server_import_failed: "服务器路径导入失败，请查看 API 日志",
     server_import_timeout: "服务器路径导入超时，请检查挂载目录、MinIO 和视频文件是否可读取"
   };
@@ -700,6 +735,35 @@ function VideoCardPreview({ name, previewUrl }: VideoCardPreviewProps) {
   return <img src={previewUrl} alt="" loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000" }} />;
 }
 
+function WorkbenchLoadingScreen() {
+  return (
+    <main className="mr-workbench-loading" aria-label="正在加载 MarkReel">
+      <section className="mr-panel mr-workbench-loading__card">
+        <div className="mr-workbench-loading__brand">
+          <img src="/logo.png" alt="MarkReel" />
+          <div>
+            <strong>MarkReel</strong>
+            <span>正在连接视频审阅工作台</span>
+          </div>
+        </div>
+        <div className="mr-workbench-loading__layout" aria-hidden="true">
+          <div className="mr-workbench-loading__side">
+            <span />
+            <span />
+            <span />
+          </div>
+          <div className="mr-workbench-loading__main">
+            <span />
+            <span />
+            <span />
+            <span />
+          </div>
+        </div>
+      </section>
+    </main>
+  );
+}
+
 type DialogState =
   | { type: "create_project"; value: string }
   | { type: "rename_project"; value: string; projectId: string }
@@ -715,6 +779,7 @@ export default function AppClient() {
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [user, setUser] = useState<ApiUser | null>(null);
+  const [authChecking, setAuthChecking] = useState(true);
   const [workspaces, setWorkspaces] = useState<Project[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
@@ -859,6 +924,8 @@ export default function AppClient() {
       setErr(null);
     } catch {
       resetAuthenticatedState();
+    } finally {
+      setAuthChecking(false);
     }
   }
 
@@ -898,6 +965,7 @@ export default function AppClient() {
     setShareExpiry("7d");
     setSharePermissions(["view"]);
     setBusy(false);
+    setAuthChecking(false);
     if (typeof window !== "undefined") {
       window.localStorage.removeItem("mr_last_workbench_url");
     }
@@ -922,7 +990,11 @@ export default function AppClient() {
 
   useEffect(() => {
     if (!user) return;
-    void refreshWorkspaces();
+    void refreshWorkspaces().catch((e) => {
+      const message = toZhError(e);
+      setErr(message);
+      showFeedback("error", message);
+    });
   }, [user?.id]);
 
   useEffect(() => {
@@ -957,8 +1029,13 @@ export default function AppClient() {
 
   useEffect(() => {
     if (!user || !effectivePid) return;
-    void refreshWorkspace(effectivePid, effectiveFid);
-    void refreshTrash(effectivePid);
+    void refreshWorkspace(effectivePid, effectiveFid).catch((e) => {
+      const message = toZhError(e);
+      setErr(message);
+      setWorkspace(null);
+      showFeedback("error", message);
+    });
+    void refreshTrash(effectivePid).catch(() => setTrashItems([]));
   }, [user?.id, effectivePid, effectiveFid]);
 
   useEffect(() => {
@@ -1983,7 +2060,7 @@ export default function AppClient() {
           method: "POST",
           body: JSON.stringify({
             filename: file.name,
-            contentType: file.type || "application/octet-stream",
+            contentType: resolveVideoContentType(file),
             mode: draft.mode
           })
         }
@@ -2006,7 +2083,7 @@ export default function AppClient() {
           speedBps: stats.speedBps,
           etaSeconds: stats.etaSeconds
         });
-      }, file.type || "application/octet-stream", controller.signal, () => {
+      }, resolveVideoContentType(file), controller.signal, () => {
         if (!isUploadCancelled(uploadId)) updateUpload(uploadId, { actionLabel: "直传不可用，切换代理上传" });
       });
 
@@ -2065,10 +2142,15 @@ export default function AppClient() {
 
   async function onUpload(draft: UploadDraft) {
     if (!effectivePid || !rootFid) return;
-    const files = draft.files.length > 0 ? draft.files : draft.file ? [draft.file] : [];
-    if (files.length === 0) return;
+    const selectedFiles = draft.files.length > 0 ? draft.files : draft.file ? [draft.file] : [];
+    const files = selectedFiles.filter(isSupportedVideoFile);
+    if (files.length === 0) {
+      showFeedback("error", "暂不支持所选文件格式，请选择 MP4、MOV、MKV、AVI、WEBM 等视频文件");
+      return;
+    }
     setErr(null);
-    showFeedback("info", `已加入 ${files.length} 个上传任务`);
+    const skipped = selectedFiles.length - files.length;
+    showFeedback("info", skipped > 0 ? `已加入 ${files.length} 个上传任务，跳过 ${skipped} 个不支持的文件` : `已加入 ${files.length} 个上传任务`);
 
     const tasks = files.map((file, index) => {
       const title = files.length === 1 ? draft.title : stripFileExtension(file.name);
@@ -2885,10 +2967,18 @@ export default function AppClient() {
               <input
                 className="mr-input mr-upload-dialog__file-input"
                 type="file"
-                accept="video/*"
+                accept={VIDEO_FILE_ACCEPT}
                 multiple
                 onChange={(e) => {
-                  const files = Array.from(e.target.files ?? []);
+                  const selectedFiles = Array.from(e.target.files ?? []);
+                  const files = selectedFiles.filter(isSupportedVideoFile);
+                  const skipped = selectedFiles.length - files.length;
+                  if (selectedFiles.length > 0 && files.length === 0) {
+                    showFeedback("error", "暂不支持所选文件格式，请选择 MP4、MOV、MKV、AVI、WEBM 等视频文件");
+                    e.currentTarget.value = "";
+                    return;
+                  }
+                  if (skipped > 0) showFeedback("info", `已跳过 ${skipped} 个不支持的视频格式`);
                   const file = files[0] ?? null;
                   setUploadDraft((prev) => {
                     if (!prev || !file) return prev;
@@ -2985,7 +3075,9 @@ export default function AppClient() {
         </div>
       </Dialog>
 
-      {!user ? (
+      {authChecking ? (
+        <WorkbenchLoadingScreen />
+      ) : !user ? (
         <div className="mr-auth">
           <div className="mr-panel mr-auth__card">
             <div className="mr-auth__brand">

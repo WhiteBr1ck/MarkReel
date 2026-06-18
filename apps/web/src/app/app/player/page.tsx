@@ -18,6 +18,7 @@ import {
   IconKeyboard,
   IconLetterT,
   IconMaximize,
+  IconMessageCirclePlus,
   IconMessageReply,
   IconMinimize,
   IconPhotoPlus,
@@ -642,6 +643,7 @@ function PlayerPageInner() {
   const markupCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const exportCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const quickAnnotationInputRef = useRef<HTMLTextAreaElement | null>(null);
   const uiHideTimerRef = useRef<number | null>(null);
   const fastSeekTimerRef = useRef<number | null>(null);
   const fastSeekPreviousRateRef = useRef<number | null>(null);
@@ -659,6 +661,10 @@ function PlayerPageInner() {
   const [composerAttachments, setComposerAttachments] = useState<PendingImage[]>([]);
   const [composerSubmitting, setComposerSubmitting] = useState(false);
   const [composerUploading, setComposerUploading] = useState(false);
+  const [quickAnnotationOpen, setQuickAnnotationOpen] = useState(false);
+  const [quickAnnotationBody, setQuickAnnotationBody] = useState("");
+  const [quickAnnotationColor, setQuickAnnotationColor] = useState(COLOR_PRESETS[0]!);
+  const [quickAnnotationSubmitting, setQuickAnnotationSubmitting] = useState(false);
   const [draftMode, setDraftMode] = useState<DraftMode | null>(null);
   const [draftTargetId, setDraftTargetId] = useState<string | null>(null);
   const [draftBody, setDraftBody] = useState("");
@@ -908,6 +914,9 @@ function PlayerPageInner() {
     };
   }, [composerAttachments, draftAttachments]);
 
+  const canAnnotate = canMedia(media, "media:annotate");
+  const canManage = canMedia(media, "media:manage");
+
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
@@ -933,6 +942,11 @@ function PlayerPageInner() {
         void toggleFullscreen();
         return;
       }
+      if (event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        openQuickAnnotation();
+        return;
+      }
       if (event.key.toLowerCase() === "m") {
         event.preventDefault();
         toggleMute();
@@ -940,7 +954,7 @@ function PlayerPageInner() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [currentTime, isFullscreen, muted, volume, pinUi, playbackRate]);
+  }, [canAnnotate, composerColor, currentTime, isFullscreen, markupEditorOpen, muted, volume, pinUi, playbackRate]);
 
   const filteredCount = annotations.length;
   const totalReplyCount = annotations.reduce((sum, annotation) => sum + (annotation.replies?.length ?? 0), 0);
@@ -968,8 +982,6 @@ function PlayerPageInner() {
 
   const selectedAnnotation = annotations.find((item) => item.id === selectedAnnotationId) ?? null;
   const flatAnnotations = useMemo(() => annotations.flatMap((item) => [item, ...(item.replies ?? [])]), [annotations]);
-  const canAnnotate = canMedia(media, "media:annotate");
-  const canManage = canMedia(media, "media:manage");
   const selectedMarkupAttachment = useMemo(() => {
     if (!selectedAnnotation || selectedMarkupAnnotationId !== selectedAnnotation.id || isPlaying || markupEditorOpen) return null;
     return selectedAnnotation.attachments.find((attachment) => attachment.previewUrl && attachment.objectKey.startsWith(MARKUP_ATTACHMENT_PREFIX)) ?? null;
@@ -985,6 +997,12 @@ function PlayerPageInner() {
     return `${formatClock(currentTime)}/${formatClock(duration)}`;
   }, [currentFrame, currentTime, duration, primaryFile?.frameCount, timeDisplayMode]);
   const timelineProgress = duration > 0 ? clamp((currentTime / duration) * 100, 0, 100) : 0;
+
+  useEffect(() => {
+    if (!quickAnnotationOpen) return;
+    const timer = window.setTimeout(() => quickAnnotationInputRef.current?.focus(), 20);
+    return () => window.clearTimeout(timer);
+  }, [quickAnnotationOpen]);
 
   useEffect(() => {
     const canvas = markupCanvasRef.current;
@@ -1118,6 +1136,62 @@ function PlayerPageInner() {
     }
     setMuted(video.muted);
     setVolume(video.volume);
+  }
+
+  function openQuickAnnotation() {
+    if (!canAnnotate || markupEditorOpen) return;
+    const video = videoRef.current;
+    if (video && !video.paused) video.pause();
+    setQuickAnnotationColor(composerColor);
+    setQuickAnnotationOpen(true);
+    setShowUi(true);
+    clearUiHideTimer();
+  }
+
+  function closeQuickAnnotation() {
+    setQuickAnnotationOpen(false);
+    setQuickAnnotationBody("");
+  }
+
+  async function submitQuickAnnotation() {
+    if (!canAnnotate) {
+      setAnnotationError("这个分享链接只有查看权限");
+      return;
+    }
+    const cleanBody = quickAnnotationBody.trim();
+    if (!cleanBody || quickAnnotationSubmitting) return;
+    const activeMediaId = media?.id ?? mediaId;
+    if (!activeMediaId) {
+      setAnnotationError("未找到对应素材");
+      return;
+    }
+    setQuickAnnotationSubmitting(true);
+    setAnnotationError(null);
+    try {
+      await playerApi(`/media/${activeMediaId}/annotations`, {
+        method: "POST",
+        body: JSON.stringify({
+          timestampMs: Math.max(0, Math.round(currentTime * 1000)),
+          type: "text",
+          body: cleanBody,
+          color: quickAnnotationColor,
+          attachments: []
+        })
+      });
+      const next = await reloadAnnotations();
+      const createdAnnotationId = next.at(-1)?.id ?? null;
+      setSelectedAnnotationId(createdAnnotationId);
+      setSelectedMarkupAnnotationId(null);
+      setSidebarTab("annotations");
+      setQuickAnnotationBody("");
+      setQuickAnnotationOpen(false);
+      setShowUi(true);
+    } catch (e: any) {
+      const detail = e?.data?.issues?.[0]?.message as string | undefined;
+      setAnnotationError(detail ?? toZhError(e));
+    } finally {
+      setQuickAnnotationSubmitting(false);
+    }
   }
 
   async function uploadMarkupFile(file: File): Promise<AnnotationAttachment> {
@@ -1870,6 +1944,53 @@ function PlayerPageInner() {
                 <div className="mr-player-page__overlay-chip" onMouseEnter={keepUiVisible} onMouseLeave={resumeUiHide}>{annotations.length} 条标注</div>
               </div>
             ) : null}
+            {quickAnnotationOpen ? (
+              <div className="mr-player-page__quick-annotation" onMouseEnter={keepUiVisible} onMouseLeave={resumeUiHide} onClick={(event) => event.stopPropagation()}>
+                <div className="mr-player-page__quick-annotation-head">
+                  <div>
+                    <strong>快捷批注</strong>
+                    <span>{formatClock(currentTime)}</span>
+                  </div>
+                  <button type="button" className="mr-player-page__quick-close" onClick={closeQuickAnnotation} aria-label="关闭快捷批注">
+                    ×
+                  </button>
+                </div>
+                <textarea
+                  ref={quickAnnotationInputRef}
+                  className="mr-input mr-player-page__quick-textarea"
+                  value={quickAnnotationBody}
+                  placeholder="输入一句批注"
+                  onChange={(event) => setQuickAnnotationBody(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      closeQuickAnnotation();
+                    }
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void submitQuickAnnotation();
+                    }
+                  }}
+                />
+                <div className="mr-player-page__quick-row">
+                  <div className="mr-player-page__quick-swatches" aria-label="批注颜色">
+                    {COLOR_PRESETS.map((swatch) => (
+                      <button
+                        key={swatch}
+                        type="button"
+                        className={`mr-player-page__swatch${quickAnnotationColor === swatch ? " mr-player-page__swatch--active" : ""}`}
+                        style={{ background: swatch }}
+                        onClick={() => setQuickAnnotationColor(swatch)}
+                        aria-label={`颜色 ${swatch}`}
+                      />
+                    ))}
+                  </div>
+                  <button className="mr-btn mr-btn--primary mr-player-page__quick-submit" type="button" onClick={() => void submitQuickAnnotation()} disabled={quickAnnotationSubmitting || !quickAnnotationBody.trim()}>
+                    {quickAnnotationSubmitting ? "保存中…" : "保存"}
+                  </button>
+                </div>
+              </div>
+            ) : null}
             {!markupEditorOpen ? (
               <div className={`mr-player-page__overlay mr-player-page__overlay--bottom${showUi ? "" : " mr-player-page__overlay--hidden"}`}>
               <div className="mr-player-page__timeline-stack" onMouseEnter={keepUiVisible} onMouseLeave={resumeUiHide}>
@@ -1982,6 +2103,11 @@ function PlayerPageInner() {
                       </div>
                     ) : null}
                   </div>
+                  {canAnnotate ? (
+                    <IconButton title="快捷批注 (A)" onClick={openQuickAnnotation} active={quickAnnotationOpen}>
+                      <PlayerIcon icon={IconMessageCirclePlus} />
+                    </IconButton>
+                  ) : null}
                   <IconButton title={pinUi ? "关闭 UI 常驻" : "开启 UI 常驻"} onClick={() => setPinUi((prev) => !prev)} active={pinUi}>
                     <PlayerIcon icon={pinUi ? IconPinnedOff : IconPinned} />
                   </IconButton>
@@ -2591,6 +2717,12 @@ function PlayerPageInner() {
               <div>
                 <strong>F</strong>
                 <p>进入或退出全屏。</p>
+              </div>
+            </div>
+            <div className="mr-player-page__dialog-option">
+              <div>
+                <strong>A</strong>
+                <p>在当前时间打开快捷批注。</p>
               </div>
             </div>
             <div className="mr-player-page__dialog-option">

@@ -1,6 +1,8 @@
 export type ApiError = Error & {
   status?: number;
   data?: unknown;
+  path?: string;
+  method?: string;
 };
 
 const REFRESH_PATH = "/auth/refresh";
@@ -18,7 +20,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     credentials: "include"
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error("api_error"), { status: res.status, data }) as ApiError;
+  if (!res.ok) {
+    const errorCode = typeof (data as { error?: unknown }).error === "string" ? (data as { error: string }).error : "api_error";
+    throw Object.assign(new Error(`${errorCode}:${res.status}:${path}`), {
+      status: res.status,
+      data,
+      path,
+      method: init?.method ?? "GET"
+    }) as ApiError;
+  }
   return data as T;
 }
 
