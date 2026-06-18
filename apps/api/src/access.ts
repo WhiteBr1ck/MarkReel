@@ -84,7 +84,7 @@ const PROJECT_PERMISSION_CAPABILITIES: Record<ProjectPermission, ProjectCapabili
 
 const MEDIA_PERMISSION_CAPABILITIES: Record<MediaPermission, MediaCapability[]> = {
   manage: ["media:view", "media:annotate", "media:manage", "media:complete_own_annotations", "media:complete_any_annotation"],
-  annotate: ["media:view", "media:annotate", "media:complete_own_annotations"],
+  annotate: ["media:view", "media:annotate", "media:complete_own_annotations", "media:complete_any_annotation"],
   view: ["media:view"]
 };
 

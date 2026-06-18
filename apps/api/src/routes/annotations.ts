@@ -5,7 +5,7 @@ import { prisma } from "../db";
 import { auditLog } from "../audit";
 import { env } from "../env";
 import { getUserId, requireUser } from "../auth/requireUser";
-import { getAnnotationAccess, getMediaAccess, hasMediaCapability, hasCapability } from "../access";
+import { getAnnotationAccess, getMediaAccess, hasMediaCapability } from "../access";
 import { presignGetObject } from "../s3";
 
 const RectSchema = z.object({
@@ -310,7 +310,7 @@ export async function annotationRoutes(app: FastifyInstance) {
     const annotationId = (req.params as any).annotationId as string;
     const access = await assertAnnotationAccess(userId, annotationId);
     if (!access) return reply.code(404).send({ error: "not_found" });
-    if (access.authorId !== userId && !hasCapability(access.projectAccess, "project:manage_members")) return reply.code(403).send({ error: "forbidden" });
+    if (!hasMediaCapability(access.mediaAccess, "media:complete_any_annotation")) return reply.code(403).send({ error: "forbidden" });
 
     const input = CompletionSchema.parse(req.body);
     const annotation = await prisma.annotation.update({

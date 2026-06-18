@@ -192,7 +192,7 @@ async function register(app: Awaited<ReturnType<typeof createApp>>, username: st
   return { user: response.json().user as { id: string; username: string }, cookies: cookieHeader(response) };
 }
 
-test("media permissions use manage annotate view and restrict completion", async () => {
+test("media annotate permission can complete any annotation", async () => {
   const { prisma } = await dbModule;
   await setupSchema(prisma);
   const app = await createApp();
@@ -281,6 +281,15 @@ test("media permissions use manage annotate view and restrict completion", async
     assert.equal(created.statusCode, 201);
     const annotationId = created.json().id as string;
 
+    const ownerCreated = await app.inject({
+      method: "POST",
+      url: `/api/media/${mediaId}/annotations`,
+      headers: { cookie: owner.cookies },
+      payload: { timestampMs: 1400, type: "text", body: "owner note", attachments: [] }
+    });
+    assert.equal(ownerCreated.statusCode, 201);
+    const ownerAnnotationId = ownerCreated.json().id as string;
+
     const viewerCompletion = await app.inject({
       method: "PATCH",
       url: `/api/annotations/${annotationId}/completion`,
@@ -297,6 +306,15 @@ test("media permissions use manage annotate view and restrict completion", async
     });
     assert.equal(authorCompletion.statusCode, 200);
     assert.ok(authorCompletion.json().completedAt);
+
+    const annotatorCompletesOwner = await app.inject({
+      method: "PATCH",
+      url: `/api/annotations/${ownerAnnotationId}/completion`,
+      headers: { cookie: annotator.cookies },
+      payload: { completed: true }
+    });
+    assert.equal(annotatorCompletesOwner.statusCode, 200);
+    assert.ok(annotatorCompletesOwner.json().completedAt);
 
     const managerCompletion = await app.inject({
       method: "PATCH",

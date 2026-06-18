@@ -879,11 +879,11 @@ export async function shareLinkRoutes(app: FastifyInstance) {
     const annotationId = (req.params as any).annotationId as string;
     const link = await requireActiveMediaShare(token, reply);
     if (!link || !link.mediaId) return;
+    if (!canShareAnnotate(link.serializedPermissions)) return reply.code(403).send({ error: "forbidden" });
 
     const actorUserId = await getShareActorUserId(req, reply);
     const existing = await prisma.annotation.findFirst({ where: { id: annotationId, mediaId: link.mediaId, deletedAt: null }, select: { id: true, authorId: true } });
     if (!existing) return reply.code(404).send({ error: "not_found" });
-    if (existing.authorId !== actorUserId) return reply.code(403).send({ error: "forbidden" });
 
     const input = CompletionSchema.parse(req.body);
     const annotation = await prisma.annotation.update({
