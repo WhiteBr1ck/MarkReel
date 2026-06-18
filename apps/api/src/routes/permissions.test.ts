@@ -117,7 +117,7 @@ async function setupSchema(prisma: Awaited<typeof dbModule>["prisma"]) {
     "durationMs" INTEGER,
     "width" INTEGER,
     "height" INTEGER,
-    "sizeBytes" INTEGER,
+    "sizeBytes" BIGINT,
     "bitrateKbps" INTEGER,
     "frameCount" INTEGER,
     "createdAt" DATETIME NOT NULL

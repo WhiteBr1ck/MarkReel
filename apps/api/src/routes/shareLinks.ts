@@ -12,6 +12,7 @@ import { newShareToken, sha256Hex } from "../share";
 import { env } from "../env";
 import { sendObjectResponse } from "../objectResponse";
 import { putRequestBodyObject } from "../uploadProxy";
+import { serializeMediaFiles } from "../mediaSerialization";
 
 const SharePermissionSchema = z.enum(["view", "comment", "annotate"]);
 const ShareAudienceSchema = z.enum(["anyone", "authenticated"]);
@@ -756,7 +757,7 @@ export async function shareLinkRoutes(app: FastifyInstance) {
         projectCapabilities: [],
         organizationId: link.media.project.organizationId,
         creator: link.media.creator,
-        files: link.media.files,
+        files: serializeMediaFiles(link.media.files),
         myRating: null,
         averageRating: null,
         ratingCount: 0,
@@ -958,4 +959,3 @@ export async function shareLinkRoutes(app: FastifyInstance) {
     return sendObjectResponse({ reply, target: { bucket: env.S3_BUCKET_ATTACHMENTS, objectKey: attachment.objectKey }, kind: "attachment", range: typeof req.headers.range === "string" ? req.headers.range : undefined });
   });
 }
-

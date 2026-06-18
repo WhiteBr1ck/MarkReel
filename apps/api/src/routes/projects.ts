@@ -5,6 +5,7 @@ import { getUserId, requireUser } from "../auth/requireUser";
 import { getStore } from "../store";
 import { prisma } from "../db";
 import { getProjectAccess, hasCapability } from "../access";
+import { serializeSizeBytes } from "../mediaSerialization";
 
 const CreateProjectSchema = z.object({
   name: z.string().min(1).max(120),
@@ -238,7 +239,7 @@ export async function projectRoutes(app: FastifyInstance) {
         name: item.title,
         updatedAt: item.updatedAt.getTime(),
         durationSeconds: item.files[0]?.durationMs ? Math.round(item.files[0].durationMs / 1000) : undefined,
-        sizeBytes: item.files[0]?.sizeBytes ?? undefined,
+        sizeBytes: serializeSizeBytes(item.files[0]?.sizeBytes),
         width: item.files[0]?.width ?? undefined,
         height: item.files[0]?.height ?? undefined,
         frameCount: item.files[0]?.frameCount ?? undefined,

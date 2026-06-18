@@ -18,6 +18,7 @@ import { env } from "../env";
 import { auditLog } from "../audit";
 import { getMediaAccess, getProjectAccess, hasCapability, hasMediaCapability } from "../access";
 import { mediaQueue } from "../queue";
+import { serializeMediaFiles, serializeMediaMetadata, serializeSizeBytes } from "../mediaSerialization";
 
 const CreateMediaSchema = z.object({
   title: z.string().min(1).max(200),
@@ -802,7 +803,7 @@ export async function mediaRoutes(app: FastifyInstance) {
               displayName: fullMedia.creator.displayName
             }
           : null,
-        files: fullMedia.files,
+        files: serializeMediaFiles(fullMedia.files),
         ...rating
       }
     });
@@ -870,7 +871,7 @@ export async function mediaRoutes(app: FastifyInstance) {
         updatedAt: item.updatedAt.getTime(),
         deletedAt: item.deletedAt?.getTime() ?? null,
         durationSeconds: item.files[0]?.durationMs ? Math.round(item.files[0].durationMs / 1000) : undefined,
-        sizeBytes: item.files[0]?.sizeBytes ?? undefined,
+        sizeBytes: serializeSizeBytes(item.files[0]?.sizeBytes),
         width: item.files[0]?.width ?? undefined,
         height: item.files[0]?.height ?? undefined,
         frameCount: item.files[0]?.frameCount ?? undefined,
@@ -986,7 +987,7 @@ export async function mediaRoutes(app: FastifyInstance) {
               displayName: media.creator.displayName
             }
           : null,
-        files: media.files,
+        files: serializeMediaFiles(media.files),
         ...rating
       }
     };
@@ -1288,7 +1289,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       meta: { mode: input.mode, transcode }
     });
 
-    return reply.send({ ok: true, queued: registered.queued, metadata: prepared.metadata });
+    return reply.send({ ok: true, queued: registered.queued, metadata: serializeMediaMetadata(prepared.metadata) });
   });
 
   app.get("/server-import/browse", { preHandler: requireUser }, async (req, reply) => {
@@ -1405,7 +1406,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       });
 
       req.log.info({ mediaId: media.id, importPath: resolved.relativePath }, "Completed server media import");
-      return reply.code(201).send({ media, upload: { objectKey, mode: input.mode }, queued: registered.queued, metadata });
+      return reply.code(201).send({ media, upload: { objectKey, mode: input.mode }, queued: registered.queued, metadata: serializeMediaMetadata(metadata) });
     } catch (error) {
       req.log.error({ err: error, importPath: resolved.relativePath, mediaId }, "Server media import failed");
       if (mediaId) {
@@ -1417,4 +1418,3 @@ export async function mediaRoutes(app: FastifyInstance) {
     }
   });
 }
-

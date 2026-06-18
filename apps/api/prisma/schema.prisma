@@ -262,7 +262,7 @@ model MediaFile {
   durationMs        Int?
   width             Int?
   height            Int?
-  sizeBytes         Int?
+  sizeBytes         BigInt?
   bitrateKbps       Int?
   frameCount        Int?
   createdAt         DateTime @default(now())
