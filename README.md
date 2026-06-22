@@ -7,7 +7,7 @@
 <p align="center">自托管视频审阅与标注工具。</p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.2.11-4f8f5d" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.12-4f8f5d" />
   <img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0--only-555" />
 </p>
 

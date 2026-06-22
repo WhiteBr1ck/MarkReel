@@ -663,6 +663,14 @@ function formatUploadError(e: any) {
   return message;
 }
 
+function isPostUploadConfirmationError(e: any) {
+  const status = typeof e?.status === "number" ? e.status : 0;
+  const code = e?.data?.error as string | undefined;
+  if (code === "processing_failed") return false;
+  if (status === 400 || status === 401 || status === 403 || status === 404) return false;
+  return status >= 500 || code === "internal_server_error" || code === "api_error" || e instanceof TypeError;
+}
+
 function stripFileExtension(fileName: string) {
   const lastDot = fileName.lastIndexOf(".");
   return lastDot > 0 ? fileName.slice(0, lastDot) : fileName;
@@ -1493,6 +1501,17 @@ export default function AppClient() {
         }
 
         if (e?.data?.error !== "preview_not_ready" && e?.data?.error !== "not_found") {
+          if (isPostUploadConfirmationError(e)) {
+            updateUpload(id, {
+              stage: "verifying",
+              progress: 95,
+              mediaId,
+              error: undefined,
+              actionLabel: "上传完成，正在确认媒体信息"
+            });
+            await wait(2000);
+            continue;
+          }
           const message = formatUploadError(e);
           setUploadError(id, message);
           return false;
@@ -2034,6 +2053,7 @@ export default function AppClient() {
     const controller = new AbortController();
     uploadAborters.current.set(uploadId, controller);
     let mediaId: string | undefined;
+    let fileUploaded = false;
     try {
       if (isUploadCancelled(uploadId)) return false;
       updateUpload(uploadId, { stage: "preparing", progress: 5, actionLabel: "准备上传" });
@@ -2086,6 +2106,7 @@ export default function AppClient() {
       }, resolveVideoContentType(file), controller.signal, () => {
         if (!isUploadCancelled(uploadId)) updateUpload(uploadId, { actionLabel: "直传不可用，切换代理上传" });
       });
+      fileUploaded = true;
 
       if (isUploadCancelled(uploadId)) {
         void deletePendingMedia(mediaId);
@@ -2101,20 +2122,32 @@ export default function AppClient() {
         etaSeconds: undefined,
         actionLabel: "读取媒体信息"
       });
-      await api(`/media/${created.media.id}/process`, {
-        method: "POST",
-        body: JSON.stringify({
-          mode: presigned.upload.mode,
-          originalObjectKey: presigned.upload.objectKey,
-          transcode:
-            draft.mode === "compress"
-              ? {
-                  resolution: draft.targetResolution,
-                  fps: draft.targetFps
-                }
-              : undefined
-        })
-      });
+      try {
+        await api(`/media/${created.media.id}/process`, {
+          method: "POST",
+          body: JSON.stringify({
+            mode: presigned.upload.mode,
+            originalObjectKey: presigned.upload.objectKey,
+            transcode:
+              draft.mode === "compress"
+                ? {
+                    resolution: draft.targetResolution,
+                    fps: draft.targetFps
+                  }
+                : undefined
+          })
+        });
+      } catch (e: any) {
+        if (!isPostUploadConfirmationError(e)) throw e;
+        updateUpload(uploadId, {
+          stage: "verifying",
+          progress: 95,
+          mediaId: created.media.id,
+          error: undefined,
+          actionLabel: "上传完成，正在确认媒体信息"
+        });
+        showFeedback("info", "文件已上传，正在确认媒体信息");
+      }
 
       if (isUploadCancelled(uploadId)) {
         void deletePendingMedia(mediaId);
@@ -2131,9 +2164,21 @@ export default function AppClient() {
         return false;
       }
       const message = formatUploadError(e);
-      setErr(message);
-      showFeedback("error", message);
-      setUploadError(uploadId, message);
+      if (fileUploaded && mediaId && isPostUploadConfirmationError(e)) {
+        updateUpload(uploadId, {
+          stage: "verifying",
+          progress: 95,
+          mediaId,
+          error: undefined,
+          actionLabel: "上传完成，正在确认媒体信息"
+        });
+        showFeedback("info", "文件已上传，正在确认媒体信息");
+        void markUploadReady(uploadId, mediaId);
+      } else {
+        setErr(message);
+        showFeedback("error", message);
+        setUploadError(uploadId, message);
+      }
       return false;
     } finally {
       uploadAborters.current.delete(uploadId);
@@ -3142,7 +3187,7 @@ export default function AppClient() {
           left={
             <>
               <div className="mr-side-section">
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                <div className="mr-project-sidebar-head">
                   <div>
                     <div style={{ fontSize: 12, opacity: 0.7, textTransform: "uppercase", letterSpacing: 1.1 }}>Projects</div>
                     <div style={{ fontWeight: 900, marginTop: 4 }}>项目列表</div>

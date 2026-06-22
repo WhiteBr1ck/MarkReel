@@ -1835,9 +1835,7 @@ function PlayerPageInner() {
     fastSeekPreviousRateRef.current = null;
   }
 
-  if (loading) {
-    return <main className="mr-player-page"><div className="mr-panel mr-player-page__state">加载播放器中…</div></main>;
-  }
+  if (loading) return <PlayerLoadingScreen />;
 
   if (!media || !previewUrl) {
     return (
@@ -2759,8 +2757,37 @@ function PlayerPageInner() {
 
 export default function PlayerPage() {
   return (
-    <Suspense fallback={<main className="mr-player-page"><div className="mr-panel mr-player-page__state">加载播放器中…</div></main>}>
+    <Suspense fallback={<PlayerLoadingScreen />}>
       <PlayerPageInner />
     </Suspense>
+  );
+}
+
+function PlayerLoadingScreen() {
+  return (
+    <main className="mr-workbench-loading mr-workbench-loading--player" aria-label="正在加载播放器">
+      <section className="mr-panel mr-workbench-loading__card">
+        <div className="mr-workbench-loading__brand">
+          <img src="/logo.png" alt="MarkReel" />
+          <div>
+            <strong>MarkReel</strong>
+            <span>正在连接审片播放器</span>
+          </div>
+        </div>
+        <div className="mr-workbench-loading__layout" aria-hidden="true">
+          <div className="mr-workbench-loading__side">
+            <span />
+            <span />
+            <span />
+          </div>
+          <div className="mr-workbench-loading__main">
+            <span />
+            <span />
+            <span />
+            <span />
+          </div>
+        </div>
+      </section>
+    </main>
   );
 }

@@ -1,7 +1,7 @@
 {
   "name": "@markreel/web",
   "private": true,
-  "version": "0.2.11",
+  "version": "0.2.12",
   "scripts": {
     "dev": "next dev -p 5090",
     "build": "next build",
