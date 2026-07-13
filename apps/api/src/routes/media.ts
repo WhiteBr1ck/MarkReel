@@ -19,6 +19,7 @@ import { auditLog } from "../audit";
 import { getMediaAccess, getProjectAccess, hasCapability, hasMediaCapability } from "../access";
 import { mediaQueue } from "../queue";
 import { serializeMediaFiles, serializeMediaMetadata, serializeSizeBytes } from "../mediaSerialization";
+import { ensureTechnicalMetadata, technicalMetadataSelect } from "../mediaTechnicalMetadata";
 
 const CreateMediaSchema = z.object({
   title: z.string().min(1).max(200),
@@ -125,11 +126,15 @@ function timeoutAfter(ms: number, message: string) {
 
 const FfprobeFormatSchema = z.object({
   duration: z.string().optional(),
-  bit_rate: z.string().optional()
+  bit_rate: z.string().optional(),
+  format_name: z.string().optional()
 });
 
 const FfprobeStreamSchema = z.object({
   codec_type: z.string().optional(),
+  codec_name: z.string().optional(),
+  profile: z.string().optional(),
+  pix_fmt: z.string().optional(),
   width: z.number().optional(),
   height: z.number().optional(),
   duration: z.string().optional(),
@@ -196,12 +201,15 @@ async function readMediaMetadata(objectKey: string) {
 
   const parsed = FfprobeResultSchema.parse(JSON.parse(stdout));
   const videoStream = parsed.streams?.find((stream) => stream.codec_type === "video");
+  const audioStream = parsed.streams?.find((stream) => stream.codec_type === "audio");
 
   const durationSeconds =
     parseNumericString(videoStream?.duration) ??
     parseNumericString(parsed.format?.duration);
+  const videoBitrate = parseNumericString(videoStream?.bit_rate);
+  const audioBitrate = parseNumericString(audioStream?.bit_rate);
   const bitrate =
-    parseNumericString(videoStream?.bit_rate) ??
+    videoBitrate ??
     parseNumericString(parsed.format?.bit_rate);
   const explicitFrames = parseNumericString(videoStream?.nb_frames);
   const fps = parseFrameRate(videoStream?.avg_frame_rate) ?? parseFrameRate(videoStream?.r_frame_rate);
@@ -213,7 +221,15 @@ async function readMediaMetadata(objectKey: string) {
     width: videoStream?.width,
     height: videoStream?.height,
     bitrateKbps: bitrate ? Math.max(1, Math.round(bitrate / 1000)) : undefined,
-    frameCount: explicitFrames ? Math.max(1, Math.round(explicitFrames)) : derivedFrameCount ? Math.max(1, derivedFrameCount) : undefined
+    frameCount: explicitFrames ? Math.max(1, Math.round(explicitFrames)) : derivedFrameCount ? Math.max(1, derivedFrameCount) : undefined,
+    formatName: parsed.format?.format_name,
+    videoCodec: videoStream?.codec_name,
+    videoProfile: videoStream?.profile,
+    videoPixelFormat: videoStream?.pix_fmt,
+    videoFrameRate: fps,
+    videoBitrateKbps: videoBitrate ? Math.max(1, Math.round(videoBitrate / 1000)) : undefined,
+    audioCodec: audioStream?.codec_name,
+    audioBitrateKbps: audioBitrate ? Math.max(1, Math.round(audioBitrate / 1000)) : undefined
   };
 }
 
@@ -229,6 +245,9 @@ async function getPreviewTargetForMedia(mediaId: string) {
           originalObjectKey: true,
           derivedPrefix: true,
           mode: true,
+          id: true,
+          sizeBytes: true,
+          ...technicalMetadataSelect,
           createdAt: true
         },
         orderBy: { createdAt: "desc" },
@@ -339,12 +358,15 @@ async function readLocalMediaMetadata(filePath: string, sizeBytes?: number) {
 
   const parsed = FfprobeResultSchema.parse(JSON.parse(result.stdout));
   const videoStream = parsed.streams?.find((stream) => stream.codec_type === "video");
+  const audioStream = parsed.streams?.find((stream) => stream.codec_type === "audio");
 
   const durationSeconds =
     parseNumericString(videoStream?.duration) ??
     parseNumericString(parsed.format?.duration);
+  const videoBitrate = parseNumericString(videoStream?.bit_rate);
+  const audioBitrate = parseNumericString(audioStream?.bit_rate);
   const bitrate =
-    parseNumericString(videoStream?.bit_rate) ??
+    videoBitrate ??
     parseNumericString(parsed.format?.bit_rate);
   const explicitFrames = parseNumericString(videoStream?.nb_frames);
   const fps = parseFrameRate(videoStream?.avg_frame_rate) ?? parseFrameRate(videoStream?.r_frame_rate);
@@ -356,7 +378,15 @@ async function readLocalMediaMetadata(filePath: string, sizeBytes?: number) {
     width: videoStream?.width,
     height: videoStream?.height,
     bitrateKbps: bitrate ? Math.max(1, Math.round(bitrate / 1000)) : undefined,
-    frameCount: explicitFrames ? Math.max(1, Math.round(explicitFrames)) : derivedFrameCount ? Math.max(1, derivedFrameCount) : undefined
+    frameCount: explicitFrames ? Math.max(1, Math.round(explicitFrames)) : derivedFrameCount ? Math.max(1, derivedFrameCount) : undefined,
+    formatName: parsed.format?.format_name,
+    videoCodec: videoStream?.codec_name,
+    videoProfile: videoStream?.profile,
+    videoPixelFormat: videoStream?.pix_fmt,
+    videoFrameRate: fps,
+    videoBitrateKbps: videoBitrate ? Math.max(1, Math.round(videoBitrate / 1000)) : undefined,
+    audioCodec: audioStream?.codec_name,
+    audioBitrateKbps: audioBitrate ? Math.max(1, Math.round(audioBitrate / 1000)) : undefined
   };
 }
 
@@ -436,7 +466,16 @@ async function registerMediaFile(args: {
       height: args.metadata.height,
       sizeBytes: args.metadata.sizeBytes,
       bitrateKbps: args.metadata.bitrateKbps,
-      frameCount: args.metadata.frameCount
+      frameCount: args.metadata.frameCount,
+      formatName: args.metadata.formatName,
+      videoCodec: args.metadata.videoCodec,
+      videoProfile: args.metadata.videoProfile,
+      videoPixelFormat: args.metadata.videoPixelFormat,
+      videoFrameRate: args.metadata.videoFrameRate,
+      videoBitrateKbps: args.metadata.videoBitrateKbps,
+      audioCodec: args.metadata.audioCodec,
+      audioBitrateKbps: args.metadata.audioBitrateKbps,
+      technicalMetadataProbedAt: new Date()
     },
     create: {
       mediaId: args.mediaId,
@@ -449,7 +488,16 @@ async function registerMediaFile(args: {
       height: args.metadata.height,
       sizeBytes: args.metadata.sizeBytes,
       bitrateKbps: args.metadata.bitrateKbps,
-      frameCount: args.metadata.frameCount
+      frameCount: args.metadata.frameCount,
+      formatName: args.metadata.formatName,
+      videoCodec: args.metadata.videoCodec,
+      videoProfile: args.metadata.videoProfile,
+      videoPixelFormat: args.metadata.videoPixelFormat,
+      videoFrameRate: args.metadata.videoFrameRate,
+      videoBitrateKbps: args.metadata.videoBitrateKbps,
+      audioCodec: args.metadata.audioCodec,
+      audioBitrateKbps: args.metadata.audioBitrateKbps,
+      technicalMetadataProbedAt: new Date()
     }
   });
 
@@ -570,6 +618,15 @@ function mediaSelect(userId: string) {
         sizeBytes: true,
         bitrateKbps: true,
         frameCount: true,
+        formatName: true,
+        videoCodec: true,
+        videoProfile: true,
+        videoPixelFormat: true,
+        videoFrameRate: true,
+        videoBitrateKbps: true,
+        audioCodec: true,
+        audioBitrateKbps: true,
+        technicalMetadataProbedAt: true,
         createdAt: true
       },
       orderBy: { createdAt: "desc" }
@@ -1041,6 +1098,26 @@ export async function mediaRoutes(app: FastifyInstance) {
       range: typeof req.headers.range === "string" ? req.headers.range : undefined,
       notFoundError: "preview_not_ready"
     });
+  });
+
+  app.get("/media/:mediaId/technical-metadata", { preHandler: requireUser }, async (req, reply) => {
+    const userId = getUserId(req);
+    const mediaId = (req.params as any).mediaId as string;
+    const access = await assertMediaAccess(userId, mediaId, "media:view");
+    if (!access) return reply.code(404).send({ error: "not_found" });
+
+    const result = await getPreviewTargetForMedia(mediaId);
+    if (!result) return reply.code(404).send({ error: "preview_not_ready" });
+    if ("failed" in result) return reply.code(409).send({ error: "processing_failed" });
+    const file = result.media.files[0];
+    if (!file) return reply.code(404).send({ error: "preview_not_ready" });
+
+    try {
+      const metadata = await ensureTechnicalMetadata(file, result.target);
+      return reply.send({ metadata });
+    } catch {
+      return reply.code(503).send({ error: "technical_metadata_unavailable" });
+    }
   });
 
   app.get("/media/:mediaId/thumbnail", { preHandler: requireUser }, async (req, reply) => {

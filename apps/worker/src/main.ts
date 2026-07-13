@@ -34,6 +34,14 @@ type MediaMetadata = {
   sizeBytes?: number;
   bitrateKbps?: number;
   frameCount?: number;
+  formatName?: string;
+  videoCodec?: string;
+  videoProfile?: string;
+  videoPixelFormat?: string;
+  videoFrameRate?: number;
+  videoBitrateKbps?: number;
+  audioCodec?: string;
+  audioBitrateKbps?: number;
 };
 
 const execFileAsync = promisify(execFile);
@@ -76,9 +84,12 @@ async function readLocalMediaMetadata(filePath: string): Promise<MediaMetadata> 
   ]);
 
   const parsed = JSON.parse(stdout) as {
-    format?: { duration?: string; bit_rate?: string };
+    format?: { duration?: string; bit_rate?: string; format_name?: string };
     streams?: Array<{
       codec_type?: string;
+      codec_name?: string;
+      profile?: string;
+      pix_fmt?: string;
       width?: number;
       height?: number;
       duration?: string;
@@ -90,11 +101,14 @@ async function readLocalMediaMetadata(filePath: string): Promise<MediaMetadata> 
   };
 
   const videoStream = parsed.streams?.find((stream) => stream.codec_type === "video");
+  const audioStream = parsed.streams?.find((stream) => stream.codec_type === "audio");
   const durationSeconds =
     parseNumericString(videoStream?.duration) ??
     parseNumericString(parsed.format?.duration);
+  const videoBitrate = parseNumericString(videoStream?.bit_rate);
+  const audioBitrate = parseNumericString(audioStream?.bit_rate);
   const bitrate =
-    parseNumericString(videoStream?.bit_rate) ??
+    videoBitrate ??
     parseNumericString(parsed.format?.bit_rate);
   const explicitFrames = parseNumericString(videoStream?.nb_frames);
   const fps = parseFrameRate(videoStream?.avg_frame_rate) ?? parseFrameRate(videoStream?.r_frame_rate);
@@ -107,7 +121,15 @@ async function readLocalMediaMetadata(filePath: string): Promise<MediaMetadata> 
     width: videoStream?.width,
     height: videoStream?.height,
     bitrateKbps: bitrate ? Math.max(1, Math.round(bitrate / 1000)) : undefined,
-    frameCount: explicitFrames ? Math.max(1, Math.round(explicitFrames)) : derivedFrameCount ? Math.max(1, derivedFrameCount) : undefined
+    frameCount: explicitFrames ? Math.max(1, Math.round(explicitFrames)) : derivedFrameCount ? Math.max(1, derivedFrameCount) : undefined,
+    formatName: parsed.format?.format_name,
+    videoCodec: videoStream?.codec_name,
+    videoProfile: videoStream?.profile,
+    videoPixelFormat: videoStream?.pix_fmt,
+    videoFrameRate: fps,
+    videoBitrateKbps: videoBitrate ? Math.max(1, Math.round(videoBitrate / 1000)) : undefined,
+    audioCodec: audioStream?.codec_name,
+    audioBitrateKbps: audioBitrate ? Math.max(1, Math.round(audioBitrate / 1000)) : undefined
   };
 }
 
@@ -253,7 +275,16 @@ async function processCompressJob(job: Job<MediaJob>) {
         height: metadata.height,
         sizeBytes: metadata.sizeBytes,
         bitrateKbps: metadata.bitrateKbps,
-        frameCount: metadata.frameCount
+        frameCount: metadata.frameCount,
+        formatName: metadata.formatName,
+        videoCodec: metadata.videoCodec,
+        videoProfile: metadata.videoProfile,
+        videoPixelFormat: metadata.videoPixelFormat,
+        videoFrameRate: metadata.videoFrameRate,
+        videoBitrateKbps: metadata.videoBitrateKbps,
+        audioCodec: metadata.audioCodec,
+        audioBitrateKbps: metadata.audioBitrateKbps,
+        technicalMetadataProbedAt: new Date()
       }
     });
 

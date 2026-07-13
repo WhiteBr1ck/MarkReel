@@ -13,6 +13,7 @@ import { env } from "../env";
 import { sendObjectResponse } from "../objectResponse";
 import { putRequestBodyObject } from "../uploadProxy";
 import { serializeMediaFiles } from "../mediaSerialization";
+import { ensureTechnicalMetadata, technicalMetadataSelect } from "../mediaTechnicalMetadata";
 
 const SharePermissionSchema = z.enum(["view", "comment", "annotate"]);
 const ShareAudienceSchema = z.enum(["anyone", "authenticated"]);
@@ -254,6 +255,9 @@ async function getPreviewTargetForSharedMedia(mediaId: string) {
           originalObjectKey: true,
           derivedPrefix: true,
           mode: true,
+          id: true,
+          sizeBytes: true,
+          ...technicalMetadataSelect,
           createdAt: true
         },
         orderBy: { createdAt: "desc" },
@@ -320,6 +324,15 @@ async function requireActiveMediaShare(token: string, reply: any) {
               sizeBytes: true,
               bitrateKbps: true,
               frameCount: true,
+              formatName: true,
+              videoCodec: true,
+              videoProfile: true,
+              videoPixelFormat: true,
+              videoFrameRate: true,
+              videoBitrateKbps: true,
+              audioCodec: true,
+              audioBitrateKbps: true,
+              technicalMetadataProbedAt: true,
               createdAt: true
             },
             orderBy: { createdAt: "desc" }
@@ -775,6 +788,25 @@ export async function shareLinkRoutes(app: FastifyInstance) {
     if (!result) return reply.code(404).send({ error: "preview_not_ready" });
     if ("failed" in result) return reply.code(409).send({ error: "processing_failed" });
     return sendObjectResponse({ reply, target: result.target, kind: "video", range: typeof req.headers.range === "string" ? req.headers.range : undefined, notFoundError: "preview_not_ready" });
+  });
+
+  app.get("/share/:token/media/technical-metadata", async (req, reply) => {
+    const token = (req.params as any).token as string;
+    const link = await requireActiveMediaShare(token, reply);
+    if (!link || !link.mediaId) return;
+
+    const result = await getPreviewTargetForSharedMedia(link.mediaId);
+    if (!result) return reply.code(404).send({ error: "preview_not_ready" });
+    if ("failed" in result) return reply.code(409).send({ error: "processing_failed" });
+    const file = result.media.files[0];
+    if (!file) return reply.code(404).send({ error: "preview_not_ready" });
+
+    try {
+      const metadata = await ensureTechnicalMetadata(file, result.target);
+      return reply.send({ metadata });
+    } catch {
+      return reply.code(503).send({ error: "technical_metadata_unavailable" });
+    }
   });
 
   app.get("/share/:token/annotations", async (req, reply) => {

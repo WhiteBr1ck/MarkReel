@@ -120,6 +120,15 @@ async function setupSchema(prisma: Awaited<typeof dbModule>["prisma"]) {
     "sizeBytes" BIGINT,
     "bitrateKbps" INTEGER,
     "frameCount" INTEGER,
+    "formatName" TEXT,
+    "videoCodec" TEXT,
+    "videoProfile" TEXT,
+    "videoPixelFormat" TEXT,
+    "videoFrameRate" REAL,
+    "videoBitrateKbps" INTEGER,
+    "audioCodec" TEXT,
+    "audioBitrateKbps" INTEGER,
+    "technicalMetadataProbedAt" DATETIME,
     "createdAt" DATETIME NOT NULL
   )`);
   await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "MediaFile_mediaId_originalObjectKey_key" ON "MediaFile"("mediaId", "originalObjectKey")`);

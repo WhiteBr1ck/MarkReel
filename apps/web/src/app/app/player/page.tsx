@@ -15,6 +15,7 @@ import {
   IconFileText,
   IconHash,
   IconHourglass,
+  IconInfoCircle,
   IconKeyboard,
   IconLetterT,
   IconMaximize,
@@ -42,6 +43,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Dialog } from "../_components/dialog";
 import { api } from "../_components/api";
 import { useTheme } from "../_components/theme";
+import { PlaybackDiagnosticsOverlay } from "./playback-diagnostics";
+import { createPlaybackEventStats, recordPlaybackEvent, type PlaybackEventName, type PlaybackEventStats } from "./playback-diagnostics-events";
 
 type MediaDetail = {
   id: string;
@@ -76,6 +79,15 @@ type MediaDetail = {
     sizeBytes: number | null;
     bitrateKbps: number | null;
     frameCount: number | null;
+    formatName: string | null;
+    videoCodec: string | null;
+    videoProfile: string | null;
+    videoPixelFormat: string | null;
+    videoFrameRate: number | null;
+    videoBitrateKbps: number | null;
+    audioCodec: string | null;
+    audioBitrateKbps: number | null;
+    technicalMetadataProbedAt: string | null;
     createdAt: string;
   }>;
   previewUrl?: string;
@@ -119,6 +131,9 @@ type AnnotationRecord = {
 };
 
 type MediaResponse = { media: MediaDetail };
+type TechnicalMetadataResponse = {
+  metadata: Pick<MediaDetail["files"][number], "formatName" | "videoCodec" | "videoProfile" | "videoPixelFormat" | "videoFrameRate" | "videoBitrateKbps" | "audioCodec" | "audioBitrateKbps" | "technicalMetadataProbedAt">;
+};
 type AnnotationListResponse = { annotations: AnnotationRecord[] };
 type AttachmentPresignResponse = {
   upload: {
@@ -647,6 +662,7 @@ function PlayerPageInner() {
   const uiHideTimerRef = useRef<number | null>(null);
   const fastSeekTimerRef = useRef<number | null>(null);
   const fastSeekPreviousRateRef = useRef<number | null>(null);
+  const playbackEventStatsRef = useRef<PlaybackEventStats>(createPlaybackEventStats());
   const [media, setMedia] = useState<MediaDetail | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [annotations, setAnnotations] = useState<AnnotationRecord[]>([]);
@@ -675,6 +691,8 @@ function PlayerPageInner() {
   const [attachmentInputTarget, setAttachmentInputTarget] = useState<UploadTarget>("composer");
   const [deleteTarget, setDeleteTarget] = useState<AnnotationRecord | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isBuffering, setIsBuffering] = useState(false);
+  const [bufferedEnd, setBufferedEnd] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -684,6 +702,7 @@ function PlayerPageInner() {
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showShortcutDialog, setShowShortcutDialog] = useState(false);
   const [showTimeDisplayMenu, setShowTimeDisplayMenu] = useState(false);
+  const [showPlaybackDiagnostics, setShowPlaybackDiagnostics] = useState(false);
   const [timeDisplayMode, setTimeDisplayMode] = useState<TimeDisplayMode>("elapsed_total");
   const [annotationEditorFullscreen, setAnnotationEditorFullscreen] = useState(false);
   const [volume, setVolume] = useState(1);
@@ -731,6 +750,7 @@ function PlayerPageInner() {
   function playerApiPath(path: string) {
     if (!isShareMode) return path;
     if (path === "/attachments/presign") return `/share/${shareToken}/attachments/presign`;
+    if (path.startsWith("/media/") && path.endsWith("/technical-metadata")) return `/share/${shareToken}/media/technical-metadata`;
     if (path.startsWith("/media/") && path.endsWith("/annotations")) return `/share/${shareToken}/annotations`;
     if (path.startsWith("/media/") && path.includes("/annotations?")) {
       const query = path.slice(path.indexOf("?"));
@@ -854,9 +874,29 @@ function PlayerPageInner() {
     const video = videoRef.current;
     if (!video) return;
     const currentVideo = video;
+    playbackEventStatsRef.current = createPlaybackEventStats();
+    function markPlaybackEvent(eventName: PlaybackEventName) {
+      playbackEventStatsRef.current = recordPlaybackEvent(playbackEventStatsRef.current, eventName);
+    }
+    function syncBuffered() {
+      const ranges = currentVideo.buffered;
+      const current = currentVideo.currentTime || 0;
+      let nextBufferedEnd = 0;
+      for (let index = 0; index < ranges.length; index += 1) {
+        const start = ranges.start(index);
+        const end = ranges.end(index);
+        if (current >= start && current <= end) {
+          nextBufferedEnd = end;
+          break;
+        }
+        nextBufferedEnd = Math.max(nextBufferedEnd, end);
+      }
+      setBufferedEnd(nextBufferedEnd);
+    }
     function syncTime() {
       setCurrentTime(currentVideo.currentTime || 0);
       if (Number.isFinite(currentVideo.duration) && currentVideo.duration > 0) setDuration(currentVideo.duration);
+      syncBuffered();
     }
     function syncState() {
       setIsPlaying(!currentVideo.paused && !currentVideo.ended);
@@ -864,29 +904,128 @@ function PlayerPageInner() {
       setVolume(currentVideo.volume);
       setMuted(currentVideo.muted || currentVideo.volume === 0);
     }
+    function startBuffering() {
+      if (!currentVideo.paused && !currentVideo.ended) setIsBuffering(true);
+      syncBuffered();
+    }
+    function stopBuffering() {
+      setIsBuffering(false);
+      syncBuffered();
+    }
     function syncFullscreen() {
       setIsFullscreen(Boolean(document.fullscreenElement));
+    }
+    function onLoadStart() {
+      markPlaybackEvent("loadstart");
+    }
+    function onLoadedMetadata() {
+      markPlaybackEvent("loadedmetadata");
+      syncTime();
+    }
+    function onProgress() {
+      markPlaybackEvent("progress");
+      syncBuffered();
+    }
+    function onWaiting() {
+      markPlaybackEvent("waiting");
+      startBuffering();
+    }
+    function onStalled() {
+      markPlaybackEvent("stalled");
+      startBuffering();
+    }
+    function onSuspend() {
+      markPlaybackEvent("suspend");
+      syncBuffered();
+    }
+    function onCanPlay() {
+      markPlaybackEvent("canplay");
+      stopBuffering();
+    }
+    function onCanPlayThrough() {
+      markPlaybackEvent("canplaythrough");
+      stopBuffering();
+    }
+    function onPlaying() {
+      markPlaybackEvent("playing");
+      stopBuffering();
+    }
+    function onSeeking() {
+      markPlaybackEvent("seeking");
+      syncBuffered();
+    }
+    function onSeeked() {
+      markPlaybackEvent("seeked");
+      stopBuffering();
+    }
+    function onPlay() {
+      markPlaybackEvent("play");
+      syncState();
+    }
+    function onPause() {
+      markPlaybackEvent("pause");
+      syncState();
+    }
+    function onEnded() {
+      markPlaybackEvent("ended");
+      stopBuffering();
+    }
+    function onRateChange() {
+      markPlaybackEvent("ratechange");
+      syncState();
+    }
+    function onVolumeChange() {
+      markPlaybackEvent("volumechange");
+      syncState();
+    }
+    function onError() {
+      markPlaybackEvent("error");
+      syncBuffered();
     }
     syncTime();
     syncState();
     syncFullscreen();
+    currentVideo.addEventListener("loadstart", onLoadStart);
     currentVideo.addEventListener("timeupdate", syncTime);
-    currentVideo.addEventListener("loadedmetadata", syncTime);
+    currentVideo.addEventListener("progress", onProgress);
+    currentVideo.addEventListener("loadedmetadata", onLoadedMetadata);
     currentVideo.addEventListener("durationchange", syncTime);
-    currentVideo.addEventListener("play", syncState);
-    currentVideo.addEventListener("pause", syncState);
-    currentVideo.addEventListener("ratechange", syncState);
-    currentVideo.addEventListener("volumechange", syncState);
+    currentVideo.addEventListener("waiting", onWaiting);
+    currentVideo.addEventListener("stalled", onStalled);
+    currentVideo.addEventListener("suspend", onSuspend);
+    currentVideo.addEventListener("canplay", onCanPlay);
+    currentVideo.addEventListener("canplaythrough", onCanPlayThrough);
+    currentVideo.addEventListener("playing", onPlaying);
+    currentVideo.addEventListener("seeking", onSeeking);
+    currentVideo.addEventListener("seeked", onSeeked);
+    currentVideo.addEventListener("play", onPlay);
+    currentVideo.addEventListener("pause", onPause);
+    currentVideo.addEventListener("ended", onEnded);
+    currentVideo.addEventListener("ratechange", onRateChange);
+    currentVideo.addEventListener("volumechange", onVolumeChange);
+    currentVideo.addEventListener("error", onError);
     document.addEventListener("fullscreenchange", syncFullscreen);
     return () => {
       currentVideo.pause();
+      currentVideo.removeEventListener("loadstart", onLoadStart);
       currentVideo.removeEventListener("timeupdate", syncTime);
-      currentVideo.removeEventListener("loadedmetadata", syncTime);
+      currentVideo.removeEventListener("progress", onProgress);
+      currentVideo.removeEventListener("loadedmetadata", onLoadedMetadata);
       currentVideo.removeEventListener("durationchange", syncTime);
-      currentVideo.removeEventListener("play", syncState);
-      currentVideo.removeEventListener("pause", syncState);
-      currentVideo.removeEventListener("ratechange", syncState);
-      currentVideo.removeEventListener("volumechange", syncState);
+      currentVideo.removeEventListener("waiting", onWaiting);
+      currentVideo.removeEventListener("stalled", onStalled);
+      currentVideo.removeEventListener("suspend", onSuspend);
+      currentVideo.removeEventListener("canplay", onCanPlay);
+      currentVideo.removeEventListener("canplaythrough", onCanPlayThrough);
+      currentVideo.removeEventListener("playing", onPlaying);
+      currentVideo.removeEventListener("seeking", onSeeking);
+      currentVideo.removeEventListener("seeked", onSeeked);
+      currentVideo.removeEventListener("play", onPlay);
+      currentVideo.removeEventListener("pause", onPause);
+      currentVideo.removeEventListener("ended", onEnded);
+      currentVideo.removeEventListener("ratechange", onRateChange);
+      currentVideo.removeEventListener("volumechange", onVolumeChange);
+      currentVideo.removeEventListener("error", onError);
       document.removeEventListener("fullscreenchange", syncFullscreen);
     };
   }, [previewUrl]);
@@ -960,6 +1099,22 @@ function PlayerPageInner() {
   const totalReplyCount = annotations.reduce((sum, annotation) => sum + (annotation.replies?.length ?? 0), 0);
   const mediaFiles = Array.isArray(media?.files) ? media.files : [];
   const primaryFile = mediaFiles.find((file) => file.mode === "derived") ?? mediaFiles[0] ?? null;
+  useEffect(() => {
+    if (!showPlaybackDiagnostics || !primaryFile || primaryFile.technicalMetadataProbedAt) return;
+    let cancelled = false;
+    void playerApi<TechnicalMetadataResponse>(`/media/${media?.id ?? mediaId}/technical-metadata`)
+      .then(({ metadata }) => {
+        if (cancelled) return;
+        setMedia((current) => current ? {
+          ...current,
+          files: current.files.map((file) => file.id === primaryFile.id ? { ...file, ...metadata } : file)
+        } : current);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [isShareMode, media?.id, mediaId, primaryFile?.id, primaryFile?.technicalMetadataProbedAt, shareToken, showPlaybackDiagnostics]);
   const frameStepSeconds = useMemo(() => {
     if (duration > 0 && primaryFile?.frameCount && primaryFile.frameCount > 0) return duration / primaryFile.frameCount;
     return 1 / 24;
@@ -997,6 +1152,7 @@ function PlayerPageInner() {
     return `${formatClock(currentTime)}/${formatClock(duration)}`;
   }, [currentFrame, currentTime, duration, primaryFile?.frameCount, timeDisplayMode]);
   const timelineProgress = duration > 0 ? clamp((currentTime / duration) * 100, 0, 100) : 0;
+  const timelineBufferedProgress = duration > 0 ? clamp((bufferedEnd / duration) * 100, timelineProgress, 100) : 0;
 
   useEffect(() => {
     if (!quickAnnotationOpen) return;
@@ -1901,10 +2057,21 @@ function PlayerPageInner() {
               onClick={handleVideoSurfaceClick}
               onDoubleClick={handleVideoSurfaceDoubleClick}
             >
-              <video ref={videoRef} key={previewUrl} src={previewUrl} playsInline className="mr-player-page__video" />
+              <video ref={videoRef} key={previewUrl} src={previewUrl} preload="metadata" playsInline className="mr-player-page__video" />
               {selectedMarkupAttachment?.previewUrl ? (
                 <img className="mr-player-page__saved-markup" src={selectedMarkupAttachment.previewUrl} alt="已保存画笔标注" />
               ) : null}
+              {isBuffering ? <div className="mr-player-page__buffering" role="status">正在缓冲...</div> : null}
+              <PlaybackDiagnosticsOverlay
+                open={showPlaybackDiagnostics}
+                videoRef={videoRef}
+                previewUrl={previewUrl}
+                mediaMetadata={primaryFile}
+                eventStatsRef={playbackEventStatsRef}
+                onClose={() => setShowPlaybackDiagnostics(false)}
+                onMouseEnter={keepUiVisible}
+                onMouseLeave={resumeUiHide}
+              />
               {markupEditorOpen ? (
                 <div
                   className={`mr-player-page__markup-layer mr-player-page__markup-layer--active${markupTool === "text" ? " mr-player-page__markup-layer--text" : ""}`}
@@ -2022,7 +2189,7 @@ function PlayerPageInner() {
                     max={Math.max(duration, 0.001)}
                     step="0.01"
                     value={Math.min(currentTime, duration || currentTime)}
-                    style={{ "--timeline-progress": `${timelineProgress}%` } as CSSProperties}
+                    style={{ "--timeline-progress": `${timelineProgress}%`, "--timeline-buffered": `${timelineBufferedProgress}%` } as CSSProperties}
                     onMouseMove={handleTimelinePointer}
                     onMouseLeave={() => setHoverTime(null)}
                     onChange={(event) => seekTo(Number(event.target.value))}
@@ -2106,6 +2273,9 @@ function PlayerPageInner() {
                       <PlayerIcon icon={IconMessageCirclePlus} />
                     </IconButton>
                   ) : null}
+                  <IconButton title="视频详细信息" onClick={() => setShowPlaybackDiagnostics((prev) => !prev)} active={showPlaybackDiagnostics}>
+                    <PlayerIcon icon={IconInfoCircle} />
+                  </IconButton>
                   <IconButton title={pinUi ? "关闭 UI 常驻" : "开启 UI 常驻"} onClick={() => setPinUi((prev) => !prev)} active={pinUi}>
                     <PlayerIcon icon={pinUi ? IconPinnedOff : IconPinned} />
                   </IconButton>

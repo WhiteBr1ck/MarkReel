@@ -265,6 +265,15 @@ model MediaFile {
   sizeBytes         BigInt?
   bitrateKbps       Int?
   frameCount        Int?
+  formatName        String?
+  videoCodec        String?
+  videoProfile      String?
+  videoPixelFormat  String?
+  videoFrameRate    Float?
+  videoBitrateKbps  Int?
+  audioCodec        String?
+  audioBitrateKbps  Int?
+  technicalMetadataProbedAt DateTime?
   createdAt         DateTime @default(now())
 
   media Media @relation(fields: [mediaId], references: [id])

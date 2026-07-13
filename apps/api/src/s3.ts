@@ -201,3 +201,18 @@ export async function presignGetObject(args: {
   return `/api/objects/${encodeURIComponent(args.bucket)}/${encodeURIComponent(args.objectKey)}`;
 }
 
+export async function presignInternalGetObject(args: {
+  bucket: string;
+  objectKey: string;
+  expiresInSeconds?: number;
+}) {
+  return getSignedUrl(
+    s3,
+    new GetObjectCommand({
+      Bucket: args.bucket,
+      Key: args.objectKey
+    }),
+    { expiresIn: args.expiresInSeconds ?? 300 }
+  );
+}
+
