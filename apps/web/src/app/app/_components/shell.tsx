@@ -25,11 +25,16 @@ export type Project = {
   id: string;
   name: string;
   ownerId: string;
+  owner?: {
+    id: string;
+    username: string;
+    displayName: string | null;
+  } | null;
   organizationId?: string | null;
   createdAt: string;
   updatedAt: string;
   role?: "owner" | "editor" | "commenter" | "viewer";
-  accessSource?: "owner" | "project_grant" | "legacy_member";
+  accessSource?: "admin" | "owner" | "project_grant" | "legacy_member";
   capabilities?: string[];
 };
 

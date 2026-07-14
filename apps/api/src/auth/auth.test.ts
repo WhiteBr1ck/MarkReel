@@ -113,6 +113,7 @@ test("refresh survives an expired access token response", async () => {
     const refreshed = await app.inject({ method: "POST", url: "/api/auth/refresh", headers: { cookie: invalidAccessCookies } });
     assert.equal(refreshed.statusCode, 200);
     assert.equal(refreshed.json().ok, true);
+    assert.equal(refreshed.json().accessExpiresInSeconds, 900);
     assert.ok(refreshed.cookies.some((cookie) => cookie.name === "mr_access"));
   } finally {
     await app.close();
@@ -183,6 +184,60 @@ test("admin resets password and old user session is rejected", async () => {
 
     const newLogin = await app.inject({ method: "POST", url: "/api/auth/login", payload: { username: "frank", password: "newpass123" } });
     assert.equal(newLogin.statusCode, 200);
+  } finally {
+    await app.close();
+  }
+});
+
+test("admin can manage projects owned by another user in memory store", async () => {
+  const app = await createApp();
+  try {
+    const owner = await app.inject({
+      method: "POST",
+      url: "/api/auth/register",
+      payload: { username: "project_owner", password: "password123", displayName: "Project Owner" }
+    });
+    assert.equal(owner.statusCode, 200);
+    const ownerCookies = cookieHeader(owner);
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects",
+      headers: { cookie: ownerCookies },
+      payload: { name: "Owner Project" }
+    });
+    assert.equal(created.statusCode, 201);
+    const projectId = created.json().project.id as string;
+
+    const admin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { username: "admin", password: "adminadmin" }
+    });
+    assert.equal(admin.statusCode, 200);
+    const adminCookies = cookieHeader(admin);
+
+    const projects = await app.inject({ method: "GET", url: "/api/projects", headers: { cookie: adminCookies } });
+    assert.equal(projects.statusCode, 200);
+    const listed = projects.json().projects.find((project: any) => project.id === projectId);
+    assert.ok(listed);
+    assert.equal(listed.owner.displayName, "Project Owner");
+    assert.equal(listed.accessSource, "admin");
+
+    const renamed = await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${projectId}`,
+      headers: { cookie: adminCookies },
+      payload: { name: "Admin Managed Project" }
+    });
+    assert.equal(renamed.statusCode, 200);
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/api/projects/${projectId}`,
+      headers: { cookie: adminCookies }
+    });
+    assert.equal(deleted.statusCode, 200);
   } finally {
     await app.close();
   }

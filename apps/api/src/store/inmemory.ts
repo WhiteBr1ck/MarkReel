@@ -39,10 +39,23 @@ function ensureMembership(userId: string, projectId: string) {
 }
 
 function withOwnerAccess(project: StoreProject): StoreProject {
+  const owner = usersById.get(project.ownerId);
   return {
     ...project,
+    owner: owner ? { id: owner.id, username: owner.username, displayName: owner.displayName } : null,
     role: "owner",
     accessSource: "owner",
+    capabilities: capabilitiesForRole("owner")
+  };
+}
+
+function withAdminAccess(project: StoreProject): StoreProject {
+  const owner = usersById.get(project.ownerId);
+  return {
+    ...project,
+    owner: owner ? { id: owner.id, username: owner.username, displayName: owner.displayName } : null,
+    role: "owner",
+    accessSource: "admin",
     capabilities: capabilitiesForRole("owner")
   };
 }
@@ -264,6 +277,12 @@ export function createInMemoryStore(): Store {
     },
 
     async projectListForUser(userId) {
+      const actor = usersById.get(userId);
+      if (actor?.globalRole === "admin") {
+        return Array.from(projectsById.values())
+          .map((project) => withAdminAccess(project))
+          .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+      }
       const ids = membershipsByUserId.get(userId);
       if (!ids) return [];
       return Array.from(ids)
@@ -279,6 +298,11 @@ export function createInMemoryStore(): Store {
         id: randomUUID(),
         name,
         ownerId: userId,
+        owner: {
+          id: userId,
+          username: usersById.get(userId)?.username ?? userId,
+          displayName: usersById.get(userId)?.displayName ?? null
+        },
         createdAt: t,
         updatedAt: t
       };
@@ -288,6 +312,11 @@ export function createInMemoryStore(): Store {
     },
 
     async projectGetForUser({ userId, projectId }) {
+      const actor = usersById.get(userId);
+      if (actor?.globalRole === "admin") {
+        const project = projectsById.get(projectId) ?? null;
+        return project ? withAdminAccess(project) : null;
+      }
       const memberships = membershipsByUserId.get(userId);
       if (!memberships?.has(projectId)) return null;
       const project = projectsById.get(projectId) ?? null;
@@ -296,20 +325,22 @@ export function createInMemoryStore(): Store {
 
     async projectRenameForUser({ userId, projectId, name }) {
       const project = projectsById.get(projectId);
-      if (!project || project.ownerId !== userId) return null;
+      const isAdmin = usersById.get(userId)?.globalRole === "admin";
+      if (!project || (!isAdmin && project.ownerId !== userId)) return null;
       project.name = name;
       project.updatedAt = now();
-      return project;
+      return isAdmin ? withAdminAccess(project) : withOwnerAccess(project);
     },
 
     async projectDeleteForUser({ userId, projectId }) {
       const project = projectsById.get(projectId);
-      if (!project || project.ownerId !== userId) return null;
+      const isAdmin = usersById.get(userId)?.globalRole === "admin";
+      if (!project || (!isAdmin && project.ownerId !== userId)) return null;
       projectsById.delete(projectId);
       for (const memberships of membershipsByUserId.values()) {
         memberships.delete(projectId);
       }
-      return project;
+      return isAdmin ? withAdminAccess(project) : withOwnerAccess(project);
     }
   };
 }

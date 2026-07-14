@@ -2366,9 +2366,14 @@ export default function AppClient() {
   const renameState = getRenameTarget();
   const renameDisabled = !workspace || !selectionMode || !canEditAssets || "error" in renameState;
   const renameHint = renameDisabled ? (!canEditAssets ? "当前权限不能修改素材" : "error" in renameState ? renameState.error : "请先进入多选模式") : "重命名当前选中条目";
-  const projectOwnerLabel = currentProject?.ownerId === user?.id
-    ? (user?.displayName?.trim() || user?.username || "未知")
-    : currentProject?.ownerId ?? "未知";
+  const projectOwnerLabel = currentProject?.owner?.displayName?.trim()
+    || currentProject?.owner?.username
+    || (currentProject?.ownerId === user?.id ? user?.displayName?.trim() || user?.username : null)
+    || currentProject?.ownerId
+    || "未知";
+  const currentProjectRoleLabel = user?.globalRole === "admin" && currentProject?.ownerId !== user.id
+    ? "管理员"
+    : roleLabel(currentProject?.role);
   const projectViewSizeBytes = visibleItems.reduce((sum, item) => sum + (item.kind === "video" ? item.sizeBytes ?? 0 : 0), 0);
 
   return (
@@ -3256,10 +3261,10 @@ export default function AppClient() {
               </div>
 
               <div className="mr-side-section">
-                <div className="mr-side-section__title">参与项目</div>
+                <div className="mr-side-section__title">{user?.globalRole === "admin" ? "管理项目" : "参与项目"}</div>
                 {sharedProjects.length === 0 ? (
                   <div className="mr-panel" style={{ padding: 12, boxShadow: "none", color: "var(--muted)", lineHeight: 1.6 }}>
-                    暂无参与项目，后续这里会展示你加入的项目。
+                    {user?.globalRole === "admin" ? "暂无其他用户项目。" : "暂无参与项目，后续这里会展示你加入的项目。"}
                   </div>
                 ) : (
                   <div style={{ display: "grid", gap: 8 }}>
@@ -3788,7 +3793,7 @@ export default function AppClient() {
                       </div>
                       <div className="mr-project-meta">
                         <span>我的权限</span>
-                        <strong>{roleLabel(currentProject.role)}</strong>
+                        <strong>{currentProjectRoleLabel}</strong>
                       </div>
                       {canProject(currentProject, "project:manage_members") ? (
                         <button className="mr-btn mr-btn--primary" type="button" onClick={() => openCollaborationDialog(currentProject)}>

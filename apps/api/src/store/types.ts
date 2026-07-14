@@ -37,11 +37,16 @@ export type StoreProject = {
   id: string;
   name: string;
   ownerId: string;
+  owner?: {
+    id: string;
+    username: string;
+    displayName: string | null;
+  } | null;
   organizationId?: string | null;
   createdAt: Date;
   updatedAt: Date;
   role?: StoreProjectRole;
-  accessSource?: "owner" | "project_grant" | "legacy_member";
+  accessSource?: "admin" | "owner" | "project_grant" | "legacy_member";
   capabilities?: string[];
 };
 

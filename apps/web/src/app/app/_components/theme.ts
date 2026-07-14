@@ -14,14 +14,18 @@ export type UiPreferences = {
   language: Language;
   showUploadQueue: boolean;
   defaultInspectorOpen: boolean;
+  rememberPlaybackPosition: boolean;
 };
+
+type BooleanPreferenceKey = "showUploadQueue" | "defaultInspectorOpen" | "rememberPlaybackPosition";
 
 const STORAGE_KEYS = {
   theme: "mr_theme",
   accent: "mr_accent",
   language: "mr_language",
   showUploadQueue: "mr_show_upload_queue",
-  defaultInspectorOpen: "mr_default_inspector_open"
+  defaultInspectorOpen: "mr_default_inspector_open",
+  rememberPlaybackPosition: "mr_remember_playback_position"
 } as const;
 
 const DEFAULT_PREFERENCES: UiPreferences = {
@@ -29,7 +33,8 @@ const DEFAULT_PREFERENCES: UiPreferences = {
   accent: "clay",
   language: "zh-CN",
   showUploadQueue: true,
-  defaultInspectorOpen: true
+  defaultInspectorOpen: true,
+  rememberPlaybackPosition: true
 };
 
 const ACCENTS: Accent[] = ["clay", "blue", "green", "violet", "amber"];
@@ -76,7 +81,7 @@ export function getStoredLanguage(): Language {
   return LANGUAGES.includes(saved as Language) ? (saved as Language) : DEFAULT_PREFERENCES.language;
 }
 
-export function getStoredBooleanPreference(key: keyof Pick<typeof STORAGE_KEYS, "showUploadQueue" | "defaultInspectorOpen">, fallback: boolean) {
+export function getStoredBooleanPreference(key: BooleanPreferenceKey, fallback: boolean) {
   const saved = localStorage.getItem(STORAGE_KEYS[key]);
   if (saved === "true") return true;
   if (saved === "false") return false;
@@ -89,7 +94,8 @@ export function getStoredPreferences(): UiPreferences {
     accent: getStoredAccent(),
     language: getStoredLanguage(),
     showUploadQueue: getStoredBooleanPreference("showUploadQueue", DEFAULT_PREFERENCES.showUploadQueue),
-    defaultInspectorOpen: getStoredBooleanPreference("defaultInspectorOpen", DEFAULT_PREFERENCES.defaultInspectorOpen)
+    defaultInspectorOpen: getStoredBooleanPreference("defaultInspectorOpen", DEFAULT_PREFERENCES.defaultInspectorOpen),
+    rememberPlaybackPosition: getStoredBooleanPreference("rememberPlaybackPosition", DEFAULT_PREFERENCES.rememberPlaybackPosition)
   };
 }
 
@@ -105,7 +111,7 @@ export function setStoredLanguage(language: Language) {
   localStorage.setItem(STORAGE_KEYS.language, language);
 }
 
-export function setStoredBooleanPreference(key: keyof Pick<typeof STORAGE_KEYS, "showUploadQueue" | "defaultInspectorOpen">, value: boolean) {
+export function setStoredBooleanPreference(key: BooleanPreferenceKey, value: boolean) {
   localStorage.setItem(STORAGE_KEYS[key], String(value));
 }
 
@@ -115,6 +121,7 @@ export function setStoredPreferences(next: UiPreferences) {
   setStoredLanguage(next.language);
   setStoredBooleanPreference("showUploadQueue", next.showUploadQueue);
   setStoredBooleanPreference("defaultInspectorOpen", next.defaultInspectorOpen);
+  setStoredBooleanPreference("rememberPlaybackPosition", next.rememberPlaybackPosition);
 }
 
 export function applyStoredPreferences() {
@@ -227,7 +234,8 @@ function buildLanguagePack(language: Language) {
         workspaceTitle: "Default behavior",
         workspaceNote: "",
         showUploadQueue: "Show upload queue",
-        defaultInspectorOpen: "Open inspector by default"
+        defaultInspectorOpen: "Open inspector by default",
+        rememberPlaybackPosition: "Remember video progress"
       },
       common: {
         dark: "Dark",
@@ -281,7 +289,8 @@ function buildLanguagePack(language: Language) {
       workspaceTitle: "默认行为",
       workspaceNote: "",
       showUploadQueue: "显示上传队列",
-      defaultInspectorOpen: "默认开启检查器面板"
+      defaultInspectorOpen: "默认开启检查器面板",
+      rememberPlaybackPosition: "记住视频播放进度"
     },
     common: {
       dark: "深色",

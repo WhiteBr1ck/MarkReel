@@ -78,6 +78,24 @@ async function withResolvedProjectAccess<T extends { id: string; ownerId: string
   } as Omit<T, "members"> & StoreProject;
 }
 
+function withAdminProjectAccess<T extends { id: string; ownerId: string; members?: Array<{ role: ProjectRole }> }>(project: T): Omit<T, "members"> & StoreProject {
+  const { members: _members, ...rest } = project;
+  return {
+    ...rest,
+    role: "owner",
+    accessSource: "admin",
+    capabilities: capabilitiesForRole("owner")
+  } as Omit<T, "members"> & StoreProject;
+}
+
+async function isGlobalAdmin(userId: string) {
+  const user = await prisma.user.findFirst({
+    where: { id: userId, deletedAt: null, disabledAt: null },
+    select: { globalRole: true }
+  });
+  return user?.globalRole === "admin";
+}
+
 async function defaultOrganizationForUser(userId: string) {
   const membership = await prisma.organizationMember.findFirst({
     where: { userId, organization: { deletedAt: null } },
@@ -319,27 +337,32 @@ export function createPrismaStore(): Store {
     },
 
     async projectListForUser(userId) {
+      const isAdmin = await isGlobalAdmin(userId);
       const rows = await prisma.project.findMany({
-        where: {
-          deletedAt: null,
-          OR: [
-            { ownerId: userId },
-            { members: { some: { userId } } },
-            { permissionGrants: { some: { subjectType: "invited_user", subjectUserId: userId } } },
-            { organization: { members: { some: { userId } } }, permissionGrants: { some: { subjectType: "organization" } } }
-          ]
-        },
+        where: isAdmin
+          ? { deletedAt: null }
+          : {
+              deletedAt: null,
+              OR: [
+                { ownerId: userId },
+                { members: { some: { userId } } },
+                { permissionGrants: { some: { subjectType: "invited_user", subjectUserId: userId } } },
+                { organization: { members: { some: { userId } } }, permissionGrants: { some: { subjectType: "organization" } } }
+              ]
+            },
         orderBy: { updatedAt: "desc" },
         select: {
           id: true,
           name: true,
           ownerId: true,
+          owner: { select: { id: true, username: true, displayName: true } },
           organizationId: true,
           createdAt: true,
           updatedAt: true,
           members: { where: { userId }, select: { role: true }, take: 1 }
         }
       });
+      if (isAdmin) return rows.map((row) => withAdminProjectAccess(row));
       return Promise.all(rows.map((row) => withResolvedProjectAccess(row, userId)));
     },
 
@@ -360,58 +383,92 @@ export function createPrismaStore(): Store {
             create: ["manage", "upload", "view"].map((permission) => ({ subjectType: "creator", subjectKey: "", permission: permission as any }))
           }
         },
-        select: { id: true, name: true, ownerId: true, organizationId: true, createdAt: true, updatedAt: true }
+        select: {
+          id: true,
+          name: true,
+          ownerId: true,
+          owner: { select: { id: true, username: true, displayName: true } },
+          organizationId: true,
+          createdAt: true,
+          updatedAt: true
+        }
       });
       return project;
     },
 
     async projectGetForUser({ userId, projectId }) {
+      const isAdmin = await isGlobalAdmin(userId);
       const project = await prisma.project.findFirst({
-        where: {
-          id: projectId,
-          deletedAt: null,
-          OR: [
-            { ownerId: userId },
-            { members: { some: { userId } } },
-            { permissionGrants: { some: { subjectType: "invited_user", subjectUserId: userId } } },
-            { organization: { members: { some: { userId } } }, permissionGrants: { some: { subjectType: "organization" } } }
-          ]
-        },
+        where: isAdmin
+          ? { id: projectId, deletedAt: null }
+          : {
+              id: projectId,
+              deletedAt: null,
+              OR: [
+                { ownerId: userId },
+                { members: { some: { userId } } },
+                { permissionGrants: { some: { subjectType: "invited_user", subjectUserId: userId } } },
+                { organization: { members: { some: { userId } } }, permissionGrants: { some: { subjectType: "organization" } } }
+              ]
+            },
         select: {
           id: true,
           name: true,
           ownerId: true,
+          owner: { select: { id: true, username: true, displayName: true } },
           organizationId: true,
           createdAt: true,
           updatedAt: true,
           members: { where: { userId }, select: { role: true }, take: 1 }
         }
       });
-      return project ? withResolvedProjectAccess(project, userId) : null;
+      if (!project) return null;
+      return isAdmin ? withAdminProjectAccess(project) : withResolvedProjectAccess(project, userId);
     },
 
     async projectRenameForUser({ userId, projectId, name }) {
+      const isAdmin = await isGlobalAdmin(userId);
       const project = await prisma.project.findFirst({
-        where: {
-          id: projectId,
-          deletedAt: null,
-          OR: [{ ownerId: userId }, { members: { some: { userId, role: { in: ["owner", "editor"] } } } }]
-        },
+        where: isAdmin
+          ? { id: projectId, deletedAt: null }
+          : {
+              id: projectId,
+              deletedAt: null,
+              OR: [{ ownerId: userId }, { members: { some: { userId, role: { in: ["owner", "editor"] } } } }]
+            },
         select: { id: true }
       });
       if (!project) return null;
 
-      return prisma.project.update({
+      const updated = await prisma.project.update({
         where: { id: projectId },
         data: { name },
-        select: { id: true, name: true, ownerId: true, createdAt: true, updatedAt: true }
+        select: {
+          id: true,
+          name: true,
+          ownerId: true,
+          owner: { select: { id: true, username: true, displayName: true } },
+          organizationId: true,
+          createdAt: true,
+          updatedAt: true
+        }
       });
+      return isAdmin ? withAdminProjectAccess(updated) : withResolvedProjectAccess(updated, userId);
     },
 
     async projectDeleteForUser({ userId, projectId }) {
+      const isAdmin = await isGlobalAdmin(userId);
       const project = await prisma.project.findFirst({
-        where: { id: projectId, ownerId: userId, deletedAt: null },
-        select: { id: true, name: true, ownerId: true, createdAt: true, updatedAt: true }
+        where: isAdmin ? { id: projectId, deletedAt: null } : { id: projectId, ownerId: userId, deletedAt: null },
+        select: {
+          id: true,
+          name: true,
+          ownerId: true,
+          owner: { select: { id: true, username: true, displayName: true } },
+          organizationId: true,
+          createdAt: true,
+          updatedAt: true
+        }
       });
       if (!project) return null;
 

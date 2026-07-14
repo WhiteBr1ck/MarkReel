@@ -9,6 +9,8 @@ type ByteRange = {
   end: number;
 };
 
+export const VIDEO_RANGE_CHUNK_BYTES = 64 * 1024 * 1024;
+
 const videoContentTypesByExtension: Record<string, string> = {
   mp4: "video/mp4",
   m4v: "video/mp4",
@@ -31,7 +33,7 @@ function resolveContentType(args: { kind: ObjectResponseKind; objectKey: string;
   return videoContentTypesByExtension[objectExtension(args.objectKey)] ?? args.contentType ?? "application/octet-stream";
 }
 
-function parseByteRange(range: string, total: number): ByteRange | null {
+export function parseByteRange(range: string, total: number, maxOpenEndedBytes?: number): ByteRange | null {
   const match = /^bytes=(\d*)-(\d*)$/.exec(range);
   if (!match) return null;
 
@@ -49,7 +51,11 @@ function parseByteRange(range: string, total: number): ByteRange | null {
   }
 
   const start = Number(startRaw);
-  const requestedEnd = endRaw ? Number(endRaw) : total - 1;
+  const requestedEnd = endRaw
+    ? Number(endRaw)
+    : maxOpenEndedBytes
+      ? Math.min(start + maxOpenEndedBytes - 1, total - 1)
+      : total - 1;
   if (!Number.isFinite(start) || !Number.isFinite(requestedEnd)) return null;
   if (start < 0 || requestedEnd < 0 || start > requestedEnd || start >= total) return null;
 
@@ -76,7 +82,11 @@ export async function sendObjectResponse(args: {
   });
 
   if (args.range && objectMeta.sizeBytes) {
-    const parsedRange = parseByteRange(args.range, objectMeta.sizeBytes);
+    const parsedRange = parseByteRange(
+      args.range,
+      objectMeta.sizeBytes,
+      args.kind === "video" ? VIDEO_RANGE_CHUNK_BYTES : undefined
+    );
     if (!parsedRange) return args.reply.code(416).send();
 
     const rangedObject = await getObjectStream({

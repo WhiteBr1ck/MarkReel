@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { IconChevron } from "../_components/icons";
 import { api } from "../_components/api";
+import { clearAllStoredPlaybackProgress } from "../_components/playback-progress";
 import { type Accent, type Language, type Theme, useUiPreferences } from "../_components/theme";
 
 function sanitizeWorkbenchHref(value: string | null): string {
@@ -214,6 +215,24 @@ export default function SettingsPage() {
                   <small>{preferences.defaultInspectorOpen ? labels.common.on : labels.common.off}</small>
                 </span>
                 <span className={`mr-page__toggle-pill${preferences.defaultInspectorOpen ? " mr-page__toggle-pill--active" : ""}`}>
+                  <span className="mr-page__toggle-knob" />
+                </span>
+              </button>
+
+              <button
+                type="button"
+                className="mr-page__toggle"
+                onClick={() => {
+                  const next = !preferences.rememberPlaybackPosition;
+                  patchPreferences({ rememberPlaybackPosition: next });
+                  if (!next) clearAllStoredPlaybackProgress();
+                }}
+              >
+                <span>
+                  <strong>{labels.settings.rememberPlaybackPosition}</strong>
+                  <small>{preferences.rememberPlaybackPosition ? labels.common.on : labels.common.off}</small>
+                </span>
+                <span className={`mr-page__toggle-pill${preferences.rememberPlaybackPosition ? " mr-page__toggle-pill--active" : ""}`}>
                   <span className="mr-page__toggle-knob" />
                 </span>
               </button>

@@ -28,7 +28,7 @@ export type ProjectAccess = {
   projectId: string;
   role: ProjectRole;
   permissions: ProjectPermission[];
-  accessSource: "owner" | "project_grant" | "legacy_member";
+  accessSource: "admin" | "owner" | "project_grant" | "legacy_member";
   capabilities: ProjectCapability[];
 };
 
@@ -160,24 +160,40 @@ export function projectPermissionsToMediaPermissions(permissions: ProjectPermiss
 }
 
 export async function getProjectAccess(args: { userId: string; projectId: string }): Promise<ProjectAccess | null> {
-  const project = await prisma.project.findFirst({
-    where: { id: args.projectId, deletedAt: null },
-    select: {
-      id: true,
-      ownerId: true,
-      organizationId: true,
-      members: {
-        where: { userId: args.userId },
-        select: { role: true },
-        take: 1
-      },
-      permissionGrants: {
-        select: { subjectType: true, subjectUserId: true, permission: true }
+  const [project, actor] = await Promise.all([
+    prisma.project.findFirst({
+      where: { id: args.projectId, deletedAt: null },
+      select: {
+        id: true,
+        ownerId: true,
+        organizationId: true,
+        members: {
+          where: { userId: args.userId },
+          select: { role: true },
+          take: 1
+        },
+        permissionGrants: {
+          select: { subjectType: true, subjectUserId: true, permission: true }
+        }
       }
-    }
-  });
+    }),
+    prisma.user.findFirst({
+      where: { id: args.userId, deletedAt: null, disabledAt: null },
+      select: { globalRole: true }
+    })
+  ]);
 
   if (!project) return null;
+  if (actor?.globalRole === "admin") {
+    const permissions: ProjectPermission[] = ["manage", "upload", "view"];
+    return {
+      projectId: project.id,
+      role: "owner",
+      permissions,
+      accessSource: "admin",
+      capabilities: capabilitiesForProjectPermissions(permissions)
+    };
+  }
   if (project.ownerId === args.userId) {
     const permissions: ProjectPermission[] = ["manage", "upload", "view"];
     return {

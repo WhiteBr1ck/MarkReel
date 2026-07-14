@@ -67,11 +67,16 @@ export function PlaybackDiagnosticsOverlay({
   if (!open) return null;
 
   return (
-    <div className="mr-player-page__stats-overlay" onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} onClick={(event) => event.stopPropagation()}>
+    <div
+      className="mr-player-page__stats-overlay"
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+    >
       <div className="mr-player-page__stats-head">
         <div>
           <strong>统计信息</strong>
-          <span>实时采样，每秒刷新</span>
         </div>
         <button className="mr-player-page__stats-close" type="button" onClick={onClose} aria-label="关闭视频详细信息">
           <IconX size={17} stroke={1.8} aria-hidden="true" />

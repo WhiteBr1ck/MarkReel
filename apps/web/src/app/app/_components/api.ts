@@ -8,6 +8,13 @@ export type ApiError = Error & {
 const REFRESH_PATH = "/auth/refresh";
 const NO_REFRESH_RETRY = new Set([REFRESH_PATH, "/auth/login", "/auth/register", "/auth/logout"]);
 
+export type SessionRefreshResult = {
+  ok: true;
+  accessExpiresInSeconds?: number;
+};
+
+let refreshPromise: Promise<SessionRefreshResult> | null = null;
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body != null && !headers.has("content-type")) {
@@ -41,7 +48,17 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       throw error;
     }
 
-    await request<{ ok: true }>(REFRESH_PATH, { method: "POST", body: "{}" });
+    await refreshSession();
     return request<T>(path, init);
   }
+}
+
+export async function refreshSession(): Promise<SessionRefreshResult> {
+  if (!refreshPromise) {
+    refreshPromise = request<SessionRefreshResult>(REFRESH_PATH, { method: "POST", body: "{}" })
+      .finally(() => {
+        refreshPromise = null;
+      });
+  }
+  return refreshPromise;
 }

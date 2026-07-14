@@ -209,6 +209,7 @@ test("media annotate permission can complete any annotation", async () => {
     const owner = await register(app, "owner_perm");
     const annotator = await register(app, "annotator_perm");
     const viewer = await register(app, "viewer_perm");
+    const outsider = await register(app, "outsider_perm");
 
     const projectResponse = await app.inject({
       method: "POST",
@@ -333,6 +334,68 @@ test("media annotate permission can complete any annotation", async () => {
     });
     assert.equal(managerCompletion.statusCode, 200);
     assert.equal(managerCompletion.json().completedAt, null);
+
+    const outsiderProject = await app.inject({
+      method: "GET",
+      url: `/api/projects/${projectId}`,
+      headers: { cookie: outsider.cookies }
+    });
+    assert.equal(outsiderProject.statusCode, 404);
+
+    await prisma.user.update({ where: { id: owner.user.id }, data: { displayName: "项目拥有者" } });
+    await prisma.user.update({ where: { id: viewer.user.id }, data: { globalRole: "admin" } });
+
+    const adminProjects = await app.inject({
+      method: "GET",
+      url: "/api/projects",
+      headers: { cookie: viewer.cookies }
+    });
+    assert.equal(adminProjects.statusCode, 200);
+    const listedProject = adminProjects.json().projects.find((project: any) => project.id === projectId);
+    assert.ok(listedProject);
+    assert.equal(listedProject.owner.displayName, "项目拥有者");
+    assert.equal(listedProject.accessSource, "admin");
+    assert.ok(listedProject.capabilities.includes("project:delete"));
+
+    const adminProject = await app.inject({
+      method: "GET",
+      url: `/api/projects/${projectId}`,
+      headers: { cookie: viewer.cookies }
+    });
+    assert.equal(adminProject.statusCode, 200);
+    assert.equal(adminProject.json().project.owner.username, owner.user.username);
+    assert.equal(adminProject.json().project.accessSource, "admin");
+
+    const adminMedia = await app.inject({
+      method: "GET",
+      url: `/api/media/${mediaId}`,
+      headers: { cookie: viewer.cookies }
+    });
+    assert.equal(adminMedia.statusCode, 200);
+    assert.ok(adminMedia.json().media.capabilities.includes("media:manage"));
+
+    const adminPermissions = await app.inject({
+      method: "GET",
+      url: `/api/projects/${projectId}/permissions`,
+      headers: { cookie: viewer.cookies }
+    });
+    assert.equal(adminPermissions.statusCode, 200);
+
+    const adminRename = await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${projectId}`,
+      headers: { cookie: viewer.cookies },
+      payload: { name: "管理员已重命名" }
+    });
+    assert.equal(adminRename.statusCode, 200);
+    assert.equal(adminRename.json().project.name, "管理员已重命名");
+
+    const adminDelete = await app.inject({
+      method: "DELETE",
+      url: `/api/projects/${projectId}`,
+      headers: { cookie: viewer.cookies }
+    });
+    assert.equal(adminDelete.statusCode, 200);
   } finally {
     await app.close();
     await prisma.$disconnect();

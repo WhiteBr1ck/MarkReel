@@ -115,7 +115,7 @@ export async function authRoutes(app: FastifyInstance) {
       }
 
       await setAuthCookies(reply, { userId: user.id, sessionVersion: user.sessionVersion });
-      return reply.send({ ok: true });
+      return reply.send({ ok: true, accessExpiresInSeconds: env.JWT_ACCESS_TTL_SECONDS });
     } catch {
       clearAuthCookies(reply);
       return reply.code(401).send({ error: "unauthorized" });

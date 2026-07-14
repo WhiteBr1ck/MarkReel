@@ -38,11 +38,16 @@ import {
   type IconProps
 } from "@tabler/icons-react";
 import type { CSSProperties, ChangeEvent, ClipboardEvent, PointerEvent as ReactPointerEvent, ReactNode, WheelEvent } from "react";
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Dialog } from "../_components/dialog";
-import { api } from "../_components/api";
-import { useTheme } from "../_components/theme";
+import { api, refreshSession, type SessionRefreshResult } from "../_components/api";
+import {
+  clearStoredPlaybackProgress,
+  getStoredPlaybackProgress,
+  saveStoredPlaybackProgress
+} from "../_components/playback-progress";
+import { getStoredBooleanPreference, useTheme } from "../_components/theme";
 import { PlaybackDiagnosticsOverlay } from "./playback-diagnostics";
 import { createPlaybackEventStats, recordPlaybackEvent, type PlaybackEventName, type PlaybackEventStats } from "./playback-diagnostics-events";
 
@@ -180,6 +185,15 @@ type MarkupOperation =
   | { kind: "circle"; color: string; width: number; start: MarkupPoint; end: MarkupPoint }
   | { kind: "text"; color: string; width: number; point: MarkupPoint; text: string };
 type MarkupTextDraft = { x: number; y: number; value: string } | null;
+type PlaybackRecoveryStatus = "idle" | "recovering" | "failed";
+type AnnotationAttention = { id: string; token: number };
+type PlaybackSnapshot = {
+  currentTime: number;
+  playbackRate: number;
+  volume: number;
+  muted: boolean;
+  shouldResume: boolean;
+};
 
 const COLOR_PRESETS = ["#c96442", "#d7a55a", "#5f8f64", "#5f85d6", "#9a68d8", "#d55f8d"];
 const AVATAR_COLORS = ["#27201c", "#c96442", "#e5b56d", "#6f7f68", "#f2eadb"];
@@ -191,6 +205,11 @@ const TIME_DISPLAY_OPTIONS: Array<{ value: TimeDisplayMode; label: string; descr
 ];
 const UI_HIDE_DELAY_MS = 2000;
 const ICON_STROKE = 1.75;
+const PLAYBACK_RETRY_DELAYS_MS = [0, 750, 2000];
+const VIDEO_METADATA_TIMEOUT_MS = 15000;
+const SESSION_REFRESH_RETRY_MS = 60000;
+const PLAYBACK_PROGRESS_SAVE_STEP_SECONDS = 5;
+const RIGHT_ARROW_HOLD_SPEED_DELAY_MS = 280;
 
 function PlayerIcon({ icon: Icon }: { icon: React.ComponentType<IconProps> }) {
   return <Icon className="mr-player-page__icon-glyph" size={18} stroke={ICON_STROKE} aria-hidden="true" />;
@@ -245,6 +264,57 @@ async function safePlayVideo(video: HTMLVideoElement) {
     if (isInterruptedPlayError(error)) return;
     throw error;
   }
+}
+
+function waitForVideoMetadata(video: HTMLVideoElement) {
+  return new Promise<void>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => finish(() => reject(new Error("video_metadata_timeout"))), VIDEO_METADATA_TIMEOUT_MS);
+
+    function cleanup() {
+      window.clearTimeout(timeoutId);
+      video.removeEventListener("loadedmetadata", onLoadedMetadata);
+      video.removeEventListener("error", onError);
+    }
+
+    function finish(callback: () => void) {
+      cleanup();
+      callback();
+    }
+
+    function onLoadedMetadata() {
+      finish(resolve);
+    }
+
+    function onError() {
+      finish(() => reject(video.error ?? new Error("video_reload_failed")));
+    }
+
+    video.addEventListener("loadedmetadata", onLoadedMetadata);
+    video.addEventListener("error", onError);
+  });
+}
+
+function delay(ms: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+}
+
+function sessionRefreshDelay(result: SessionRefreshResult) {
+  const ttlSeconds = result.accessExpiresInSeconds;
+  if (!ttlSeconds || !Number.isFinite(ttlSeconds)) return 5 * 60 * 1000;
+  return Math.max(15000, Math.min(ttlSeconds * 500, 10 * 60 * 1000));
+}
+
+async function reloadVideoFromSnapshot(video: HTMLVideoElement, snapshot: PlaybackSnapshot) {
+  const metadataReady = waitForVideoMetadata(video);
+  video.load();
+  await metadataReady;
+
+  video.playbackRate = snapshot.playbackRate;
+  video.volume = snapshot.volume;
+  video.muted = snapshot.muted;
+  const maximumTime = Number.isFinite(video.duration) && video.duration > 0 ? Math.max(video.duration - 0.05, 0) : snapshot.currentTime;
+  video.currentTime = clamp(snapshot.currentTime, 0, maximumTime);
+  if (snapshot.shouldResume) await safePlayVideo(video);
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -662,7 +732,18 @@ function PlayerPageInner() {
   const uiHideTimerRef = useRef<number | null>(null);
   const fastSeekTimerRef = useRef<number | null>(null);
   const fastSeekPreviousRateRef = useRef<number | null>(null);
+  const rightArrowHoldTimerRef = useRef<number | null>(null);
+  const rightArrowPreviousRateRef = useRef<number | null>(null);
+  const rightArrowWasPausedRef = useRef(false);
+  const rightArrowHoldActiveRef = useRef(false);
   const playbackEventStatsRef = useRef<PlaybackEventStats>(createPlaybackEventStats());
+  const playbackIntentRef = useRef(false);
+  const playbackRecoveryRef = useRef<Promise<boolean> | null>(null);
+  const playbackProgressRestoredKeyRef = useRef<string | null>(null);
+  const lastStoredPlaybackPositionRef = useRef<number | null>(null);
+  const annotationScrollBodyRef = useRef<HTMLDivElement | null>(null);
+  const annotationItemRefs = useRef(new Map<string, HTMLElement>());
+  const annotationAttentionTokenRef = useRef(0);
   const [media, setMedia] = useState<MediaDetail | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [annotations, setAnnotations] = useState<AnnotationRecord[]>([]);
@@ -672,6 +753,7 @@ function PlayerPageInner() {
   const [annotationError, setAnnotationError] = useState<string | null>(null);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("annotations");
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
+  const [annotationAttention, setAnnotationAttention] = useState<AnnotationAttention | null>(null);
   const [composerBody, setComposerBody] = useState("");
   const [composerColor, setComposerColor] = useState(COLOR_PRESETS[0]!);
   const [composerAttachments, setComposerAttachments] = useState<PendingImage[]>([]);
@@ -692,11 +774,13 @@ function PlayerPageInner() {
   const [deleteTarget, setDeleteTarget] = useState<AnnotationRecord | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
+  const [playbackRecoveryStatus, setPlaybackRecoveryStatus] = useState<PlaybackRecoveryStatus>("idle");
   const [bufferedEnd, setBufferedEnd] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playbackRate, setPlaybackRate] = useState(1);
+  const [rightArrowHoldActive, setRightArrowHoldActive] = useState(false);
   const [customSpeed, setCustomSpeed] = useState("1");
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
@@ -745,6 +829,82 @@ function PlayerPageInner() {
     return () => {
       cancelled = true;
     };
+  }, [isShareMode]);
+
+  useEffect(() => {
+    if (isShareMode) return;
+    let stopped = false;
+    let timeoutId: number | null = null;
+
+    function schedule(delayMs: number) {
+      if (stopped) return;
+      if (timeoutId) window.clearTimeout(timeoutId);
+      timeoutId = window.setTimeout(() => void refresh(), delayMs);
+    }
+
+    async function refresh() {
+      try {
+        const result = await refreshSession();
+        schedule(sessionRefreshDelay(result));
+      } catch {
+        schedule(SESSION_REFRESH_RETRY_MS);
+      }
+    }
+
+    function onVisibilityChange() {
+      if (document.visibilityState !== "visible") return;
+      if (timeoutId) window.clearTimeout(timeoutId);
+      void refresh();
+    }
+
+    void refresh();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      stopped = true;
+      if (timeoutId) window.clearTimeout(timeoutId);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [isShareMode]);
+
+  const recoverPlayback = useCallback(async (video: HTMLVideoElement) => {
+    if (playbackRecoveryRef.current) return playbackRecoveryRef.current;
+
+    const snapshot: PlaybackSnapshot = {
+      currentTime: video.currentTime || 0,
+      playbackRate: video.playbackRate || 1,
+      volume: video.volume,
+      muted: video.muted,
+      shouldResume: playbackIntentRef.current || (!video.paused && !video.ended)
+    };
+
+    const recovery = (async () => {
+      setPlaybackRecoveryStatus("recovering");
+      setIsBuffering(true);
+
+      for (const retryDelay of PLAYBACK_RETRY_DELAYS_MS) {
+        if (retryDelay > 0) await delay(retryDelay);
+        try {
+          if (!isShareMode) await refreshSession();
+          await reloadVideoFromSnapshot(video, snapshot);
+          setPlaybackRecoveryStatus("idle");
+          setIsBuffering(false);
+          return true;
+        } catch {
+          continue;
+        }
+      }
+
+      setPlaybackRecoveryStatus("failed");
+      setIsBuffering(false);
+      return false;
+    })();
+
+    playbackRecoveryRef.current = recovery;
+    try {
+      return await recovery;
+    } finally {
+      if (playbackRecoveryRef.current === recovery) playbackRecoveryRef.current = null;
+    }
   }, [isShareMode]);
 
   function playerApiPath(path: string) {
@@ -874,7 +1034,51 @@ function PlayerPageInner() {
     const video = videoRef.current;
     if (!video) return;
     const currentVideo = video;
+    const playbackProgressKey = media?.id
+      ? `media:${media.id}`
+      : mediaId
+        ? `media:${mediaId}`
+        : shareToken
+          ? `share:${shareToken}`
+          : "";
+    playbackIntentRef.current = false;
+    setPlaybackRecoveryStatus("idle");
     playbackEventStatsRef.current = createPlaybackEventStats();
+    if (playbackProgressRestoredKeyRef.current !== playbackProgressKey) {
+      playbackProgressRestoredKeyRef.current = null;
+      lastStoredPlaybackPositionRef.current = null;
+    }
+
+    function remembersPlaybackPosition() {
+      return getStoredBooleanPreference("rememberPlaybackPosition", true);
+    }
+
+    function restorePlaybackProgress() {
+      if (!playbackProgressKey || playbackProgressRestoredKeyRef.current === playbackProgressKey) return;
+      playbackProgressRestoredKeyRef.current = playbackProgressKey;
+      if (!remembersPlaybackPosition()) return;
+      const savedPosition = getStoredPlaybackProgress(playbackProgressKey, currentVideo.duration || 0);
+      if (savedPosition == null) return;
+      currentVideo.currentTime = savedPosition;
+      lastStoredPlaybackPositionRef.current = savedPosition;
+      setCurrentTime(savedPosition);
+    }
+
+    function persistPlaybackProgress(force = false) {
+      if (!playbackProgressKey || !remembersPlaybackPosition()) return;
+      if (playbackProgressRestoredKeyRef.current !== playbackProgressKey) return;
+      const position = currentVideo.currentTime || 0;
+      if (position < 1) {
+        if (force || lastStoredPlaybackPositionRef.current != null) clearStoredPlaybackProgress(playbackProgressKey);
+        lastStoredPlaybackPositionRef.current = 0;
+        return;
+      }
+      const previousPosition = lastStoredPlaybackPositionRef.current;
+      if (!force && previousPosition != null && Math.abs(position - previousPosition) < PLAYBACK_PROGRESS_SAVE_STEP_SECONDS) return;
+      saveStoredPlaybackProgress(playbackProgressKey, position, currentVideo.duration || 0);
+      lastStoredPlaybackPositionRef.current = position;
+    }
+
     function markPlaybackEvent(eventName: PlaybackEventName) {
       playbackEventStatsRef.current = recordPlaybackEvent(playbackEventStatsRef.current, eventName);
     }
@@ -897,6 +1101,10 @@ function PlayerPageInner() {
       setCurrentTime(currentVideo.currentTime || 0);
       if (Number.isFinite(currentVideo.duration) && currentVideo.duration > 0) setDuration(currentVideo.duration);
       syncBuffered();
+    }
+    function onTimeUpdate() {
+      syncTime();
+      persistPlaybackProgress();
     }
     function syncState() {
       setIsPlaying(!currentVideo.paused && !currentVideo.ended);
@@ -921,6 +1129,7 @@ function PlayerPageInner() {
     function onLoadedMetadata() {
       markPlaybackEvent("loadedmetadata");
       syncTime();
+      restorePlaybackProgress();
     }
     function onProgress() {
       markPlaybackEvent("progress");
@@ -948,6 +1157,7 @@ function PlayerPageInner() {
     }
     function onPlaying() {
       markPlaybackEvent("playing");
+      setPlaybackRecoveryStatus("idle");
       stopBuffering();
     }
     function onSeeking() {
@@ -960,14 +1170,20 @@ function PlayerPageInner() {
     }
     function onPlay() {
       markPlaybackEvent("play");
+      playbackIntentRef.current = true;
       syncState();
     }
     function onPause() {
       markPlaybackEvent("pause");
+      if (!currentVideo.error) playbackIntentRef.current = false;
+      persistPlaybackProgress(true);
       syncState();
     }
     function onEnded() {
       markPlaybackEvent("ended");
+      playbackIntentRef.current = false;
+      if (playbackProgressKey) clearStoredPlaybackProgress(playbackProgressKey);
+      lastStoredPlaybackPositionRef.current = null;
       stopBuffering();
     }
     function onRateChange() {
@@ -981,12 +1197,19 @@ function PlayerPageInner() {
     function onError() {
       markPlaybackEvent("error");
       syncBuffered();
+      if (currentVideo.error?.code === MediaError.MEDIA_ERR_NETWORK) {
+        void recoverPlayback(currentVideo);
+      }
+    }
+    function onPageHide() {
+      persistPlaybackProgress(true);
     }
     syncTime();
+    if (currentVideo.readyState >= HTMLMediaElement.HAVE_METADATA) restorePlaybackProgress();
     syncState();
     syncFullscreen();
     currentVideo.addEventListener("loadstart", onLoadStart);
-    currentVideo.addEventListener("timeupdate", syncTime);
+    currentVideo.addEventListener("timeupdate", onTimeUpdate);
     currentVideo.addEventListener("progress", onProgress);
     currentVideo.addEventListener("loadedmetadata", onLoadedMetadata);
     currentVideo.addEventListener("durationchange", syncTime);
@@ -1005,10 +1228,13 @@ function PlayerPageInner() {
     currentVideo.addEventListener("volumechange", onVolumeChange);
     currentVideo.addEventListener("error", onError);
     document.addEventListener("fullscreenchange", syncFullscreen);
+    window.addEventListener("pagehide", onPageHide);
     return () => {
+      persistPlaybackProgress(true);
       currentVideo.pause();
+      playbackIntentRef.current = false;
       currentVideo.removeEventListener("loadstart", onLoadStart);
-      currentVideo.removeEventListener("timeupdate", syncTime);
+      currentVideo.removeEventListener("timeupdate", onTimeUpdate);
       currentVideo.removeEventListener("progress", onProgress);
       currentVideo.removeEventListener("loadedmetadata", onLoadedMetadata);
       currentVideo.removeEventListener("durationchange", syncTime);
@@ -1027,8 +1253,9 @@ function PlayerPageInner() {
       currentVideo.removeEventListener("volumechange", onVolumeChange);
       currentVideo.removeEventListener("error", onError);
       document.removeEventListener("fullscreenchange", syncFullscreen);
+      window.removeEventListener("pagehide", onPageHide);
     };
-  }, [previewUrl]);
+  }, [media?.id, mediaId, previewUrl, recoverPlayback, shareToken]);
 
   useEffect(() => {
     if (!isFullscreen) {
@@ -1056,6 +1283,44 @@ function PlayerPageInner() {
   const canAnnotate = canMedia(media, "media:annotate");
   const canManage = canMedia(media, "media:manage");
 
+  function endRightArrowHoldSpeed() {
+    if (rightArrowHoldTimerRef.current) {
+      window.clearTimeout(rightArrowHoldTimerRef.current);
+      rightArrowHoldTimerRef.current = null;
+    }
+
+    if (rightArrowHoldActiveRef.current) {
+      const video = videoRef.current;
+      if (video) {
+        const previousRate = rightArrowPreviousRateRef.current ?? 1;
+        video.playbackRate = previousRate;
+        setPlaybackRate(previousRate);
+        if (rightArrowWasPausedRef.current) video.pause();
+      }
+    }
+
+    rightArrowHoldActiveRef.current = false;
+    rightArrowPreviousRateRef.current = null;
+    rightArrowWasPausedRef.current = false;
+    setRightArrowHoldActive(false);
+  }
+
+  function beginRightArrowHoldSpeed() {
+    endRightArrowHoldSpeed();
+    rightArrowHoldTimerRef.current = window.setTimeout(() => {
+      rightArrowHoldTimerRef.current = null;
+      const video = videoRef.current;
+      if (!video || !document.fullscreenElement) return;
+      rightArrowPreviousRateRef.current = video.playbackRate || 1;
+      rightArrowWasPausedRef.current = video.paused;
+      rightArrowHoldActiveRef.current = true;
+      video.playbackRate = 2;
+      setPlaybackRate(2);
+      setRightArrowHoldActive(true);
+      void safePlayVideo(video).catch(() => endRightArrowHoldSpeed());
+    }, RIGHT_ARROW_HOLD_SPEED_DELAY_MS);
+  }
+
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
@@ -1073,7 +1338,13 @@ function PlayerPageInner() {
       }
       if (event.key === "ArrowRight") {
         event.preventDefault();
-        seekBy(5);
+        if (!isFullscreen) {
+          seekBy(5);
+          return;
+        }
+        if (!event.repeat && !rightArrowHoldTimerRef.current && !rightArrowHoldActiveRef.current) {
+          beginRightArrowHoldSpeed();
+        }
         return;
       }
       if (event.key.toLowerCase() === "f") {
@@ -1091,9 +1362,35 @@ function PlayerPageInner() {
         toggleMute();
       }
     }
+    function onKeyUp(event: KeyboardEvent) {
+      if (event.key !== "ArrowRight") return;
+      const hadPendingShortPress = rightArrowHoldTimerRef.current != null;
+      const wasHoldActive = rightArrowHoldActiveRef.current;
+      if (!hadPendingShortPress && !wasHoldActive) return;
+      event.preventDefault();
+      endRightArrowHoldSpeed();
+      if (hadPendingShortPress && !wasHoldActive && isFullscreen) seekBy(5);
+    }
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
   }, [canAnnotate, composerColor, currentTime, isFullscreen, markupEditorOpen, muted, volume, pinUi, playbackRate]);
+
+  useEffect(() => {
+    function onFullscreenChange() {
+      if (!document.fullscreenElement) endRightArrowHoldSpeed();
+    }
+    window.addEventListener("blur", endRightArrowHoldSpeed);
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => {
+      window.removeEventListener("blur", endRightArrowHoldSpeed);
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      endRightArrowHoldSpeed();
+    };
+  }, []);
 
   const filteredCount = annotations.length;
   const totalReplyCount = annotations.reduce((sum, annotation) => sum + (annotation.replies?.length ?? 0), 0);
@@ -1172,6 +1469,26 @@ function PlayerPageInner() {
     setSelectedMarkupAnnotationId(null);
   }, [isPlaying]);
 
+  useEffect(() => {
+    if (!annotationAttention || sidebarTab !== "annotations") return;
+    const attention = annotationAttention;
+    const frameId = window.requestAnimationFrame(() => {
+      const container = annotationScrollBodyRef.current;
+      const item = annotationItemRefs.current.get(attention.id);
+      if (!container || !item) return;
+      const targetTop = item.offsetTop - (container.clientHeight - item.offsetHeight) / 2;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      container.scrollTo({ top: Math.max(0, targetTop), behavior: reducedMotion ? "auto" : "smooth" });
+    });
+    const timerId = window.setTimeout(() => {
+      setAnnotationAttention((current) => current?.token === attention.token ? null : current);
+    }, 800);
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      window.clearTimeout(timerId);
+    };
+  }, [annotationAttention, sidebarTab]);
+
   function clearUiHideTimer() {
     if (uiHideTimerRef.current) {
       window.clearTimeout(uiHideTimerRef.current);
@@ -1230,12 +1547,19 @@ function PlayerPageInner() {
   async function togglePlayback() {
     const video = videoRef.current;
     if (!video) return;
+    if (video.error?.code === MediaError.MEDIA_ERR_NETWORK || playbackRecoveryStatus === "failed") {
+      playbackIntentRef.current = true;
+      await recoverPlayback(video);
+      return;
+    }
     if (video.paused) {
       if (markupEditorOpen) {
         setMarkupEditorOpen(false);
       }
+      playbackIntentRef.current = true;
       await safePlayVideo(video);
     } else {
+      playbackIntentRef.current = false;
       video.pause();
     }
   }
@@ -1649,11 +1973,19 @@ function PlayerPageInner() {
 
   function selectAnnotation(annotation: AnnotationRecord, pause = true) {
     const rootId = annotation.parentId ?? annotation.id;
+    setAnnotationAttention(null);
     setSelectedAnnotationId(rootId);
     setSelectedMarkupAnnotationId(annotation.attachments.some((attachment) => attachment.objectKey.startsWith(MARKUP_ATTACHMENT_PREFIX)) ? rootId : null);
     setSidebarTab("annotations");
     if (pause) videoRef.current?.pause();
     seekTo(annotation.timestampMs / 1000, true);
+  }
+
+  function selectTimelineAnnotation(annotation: AnnotationRecord) {
+    const rootId = annotation.parentId ?? annotation.id;
+    selectAnnotation(annotation, true);
+    annotationAttentionTokenRef.current += 1;
+    setAnnotationAttention({ id: rootId, token: annotationAttentionTokenRef.current });
   }
 
   async function saveRating() {
@@ -2061,7 +2393,14 @@ function PlayerPageInner() {
               {selectedMarkupAttachment?.previewUrl ? (
                 <img className="mr-player-page__saved-markup" src={selectedMarkupAttachment.previewUrl} alt="已保存画笔标注" />
               ) : null}
-              {isBuffering ? <div className="mr-player-page__buffering" role="status">正在缓冲...</div> : null}
+              {playbackRecoveryStatus === "recovering" ? (
+                <div className="mr-player-page__buffering" role="status">正在重新连接...</div>
+              ) : playbackRecoveryStatus === "failed" ? (
+                <div className="mr-player-page__buffering" role="status">连接中断，点击画面或播放按钮重试</div>
+              ) : isBuffering ? (
+                <div className="mr-player-page__buffering" role="status">正在缓冲...</div>
+              ) : null}
+              {rightArrowHoldActive ? <div className="mr-player-page__hold-speed" role="status">2x 快进</div> : null}
               <PlaybackDiagnosticsOverlay
                 open={showPlaybackDiagnostics}
                 videoRef={videoRef}
@@ -2177,7 +2516,7 @@ function PlayerPageInner() {
                           className={`mr-player-page__marker${selectedAnnotationId === annotation.id ? " mr-player-page__marker--active" : ""}`}
                           style={{ left, background: annotation.color || COLOR_PRESETS[0] }}
                           title={`${formatClock(annotation.timestampMs / 1000)} ${annotation.body || "标注"}`}
-                          onClick={() => selectAnnotation(annotation, true)}
+                          onClick={() => selectTimelineAnnotation(annotation)}
                         />
                       );
                     })}
@@ -2498,7 +2837,7 @@ function PlayerPageInner() {
                 </div>
               </div>
 
-              <div className="mr-player-page__annotation-scroll-body">
+              <div className="mr-player-page__annotation-scroll-body" ref={annotationScrollBodyRef}>
                 {annotationLoading ? (
                   <div className="mr-player-page__empty">正在加载标注…</div>
                 ) : annotations.length === 0 ? (
@@ -2511,7 +2850,14 @@ function PlayerPageInner() {
                     const showReplyDraft = draftMode === "reply" && draftTargetId === annotation.id;
                     const annotationNumber = annotationIndex + 1;
                     return (
-                      <article key={annotation.id} className={`mr-player-page__annotation-item${selectedAnnotationId === annotation.id ? " mr-player-page__annotation-item--active" : ""}`}>
+                      <article
+                        key={annotation.id}
+                        ref={(node) => {
+                          if (node) annotationItemRefs.current.set(annotation.id, node);
+                          else annotationItemRefs.current.delete(annotation.id);
+                        }}
+                        className={`mr-player-page__annotation-item${selectedAnnotationId === annotation.id ? " mr-player-page__annotation-item--active" : ""}${annotationAttention?.id === annotation.id ? " mr-player-page__annotation-item--attention" : ""}`}
+                      >
                         <div className="mr-player-page__annotation-main">
                           <div className="mr-player-page__annotation-card-head">
                             <button type="button" className="mr-player-page__annotation-anchor" onClick={() => selectAnnotation(annotation)}>
@@ -2859,7 +3205,7 @@ function PlayerPageInner() {
       <Dialog
         open={showShortcutDialog}
         title="播放器快捷键"
-        description="这些快捷键只在焦点不在输入框内时生效。"
+        description="键盘操作只在焦点不在输入框内时生效。"
         onClose={() => setShowShortcutDialog(false)}
         footer={
           <button type="button" className="mr-btn mr-btn--primary" onClick={() => setShowShortcutDialog(false)}>
@@ -2897,6 +3243,12 @@ function PlayerPageInner() {
               <div>
                 <strong>M</strong>
                 <p>静音或恢复声音。</p>
+              </div>
+            </div>
+            <div className="mr-player-page__dialog-option">
+              <div>
+                <strong>全屏长按 →</strong>
+                <p>临时以 2 倍速播放，松开后恢复原倍速和播放状态。</p>
               </div>
             </div>
           </div>
