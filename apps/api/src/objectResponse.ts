@@ -1,4 +1,5 @@
 import type { FastifyReply } from "fastify";
+import type { Readable } from "node:stream";
 import { getObjectStream, statObject } from "./s3";
 
 type ObjectTarget = { bucket: string; objectKey: string };
@@ -80,40 +81,109 @@ export async function sendObjectResponse(args: {
     objectKey: args.target.objectKey,
     contentType: objectMeta.contentType
   });
+  const abortController = new AbortController();
+  let clientClosed = false;
+  let streamSettled = false;
+  const streamStartedAt = Date.now();
+  const logContext = {
+    bucket: args.target.bucket,
+    objectKey: args.target.objectKey,
+    requestedRange: args.range,
+    kind: args.kind
+  };
+  const onClientClose = () => {
+    if (args.reply.raw.writableEnded) return;
+    clientClosed = true;
+    abortController.abort();
+  };
+  const releaseClientCloseListener = () => {
+    args.reply.raw.off("close", onClientClose);
+  };
+  const finishStream = (outcome: "completed" | "client_closed" | "stream_closed" | "error", error?: unknown) => {
+    if (streamSettled) return;
+    streamSettled = true;
+    releaseClientCloseListener();
+    const details = { ...logContext, outcome, durationMs: Date.now() - streamStartedAt };
+    if (outcome === "completed") {
+      args.reply.request.log.debug(details, "object stream completed");
+    } else if (outcome === "client_closed") {
+      args.reply.request.log.debug(details, "object stream cancelled after client disconnect");
+    } else {
+      args.reply.request.log.warn({ ...details, err: error }, "object stream ended unexpectedly");
+    }
+  };
+  const sendStream = (body: Readable) => {
+    body.once("end", () => finishStream("completed"));
+    body.once("error", (error) => finishStream(clientClosed ? "client_closed" : "error", error));
+    body.once("close", () => finishStream(clientClosed ? "client_closed" : "stream_closed"));
+    args.reply.request.log.debug(logContext, "object stream started");
+    return args.reply.send(body);
+  };
+  args.reply.raw.once("close", onClientClose);
 
-  if (args.range && objectMeta.sizeBytes) {
-    const parsedRange = parseByteRange(
-      args.range,
-      objectMeta.sizeBytes,
-      args.kind === "video" ? VIDEO_RANGE_CHUNK_BYTES : undefined
-    );
-    if (!parsedRange) return args.reply.code(416).send();
+  try {
+    if (args.range && objectMeta.sizeBytes) {
+      const parsedRange = parseByteRange(
+        args.range,
+        objectMeta.sizeBytes,
+        args.kind === "video" ? VIDEO_RANGE_CHUNK_BYTES : undefined
+      );
+      if (!parsedRange) {
+        releaseClientCloseListener();
+        return args.reply.code(416).send();
+      }
 
-    const rangedObject = await getObjectStream({
-      ...args.target,
-      range: `bytes=${parsedRange.start}-${parsedRange.end}`
-    });
-    if (!rangedObject.body) return args.reply.code(404).send({ error: notFoundError });
+      const rangedObject = await getObjectStream({
+        ...args.target,
+        range: `bytes=${parsedRange.start}-${parsedRange.end}`,
+        abortSignal: abortController.signal
+      });
+      if (!rangedObject.body) {
+        releaseClientCloseListener();
+        return args.reply.code(404).send({ error: notFoundError });
+      }
+      if (clientClosed) {
+        rangedObject.body.destroy();
+        finishStream("client_closed");
+        return args.reply;
+      }
 
-    args.reply.code(206);
-    args.reply.header("content-range", `bytes ${parsedRange.start}-${parsedRange.end}/${objectMeta.sizeBytes}`);
-    args.reply.header("content-length", String(parsedRange.end - parsedRange.start + 1));
-    args.reply.header("content-type", resolveContentType({ kind: args.kind, objectKey: args.target.objectKey, contentType: rangedObject.contentType ?? contentType }));
-    args.reply.header("accept-ranges", "bytes");
+      args.reply.code(206);
+      args.reply.header("content-range", `bytes ${parsedRange.start}-${parsedRange.end}/${objectMeta.sizeBytes}`);
+      args.reply.header("content-length", String(parsedRange.end - parsedRange.start + 1));
+      args.reply.header("content-type", resolveContentType({ kind: args.kind, objectKey: args.target.objectKey, contentType: rangedObject.contentType ?? contentType }));
+      args.reply.header("accept-ranges", "bytes");
+      if (objectMeta.etag) args.reply.header("etag", objectMeta.etag);
+      if (objectMeta.lastModified) args.reply.header("last-modified", objectMeta.lastModified.toUTCString());
+      return sendStream(rangedObject.body);
+    }
+
+    const object = await getObjectStream({ ...args.target, abortSignal: abortController.signal });
+    if (!object.body) {
+      releaseClientCloseListener();
+      return args.reply.code(404).send({ error: notFoundError });
+    }
+    if (clientClosed) {
+      object.body.destroy();
+      finishStream("client_closed");
+      return args.reply;
+    }
+
+    args.reply.header("content-type", resolveContentType({ kind: args.kind, objectKey: args.target.objectKey, contentType: object.contentType ?? contentType }));
+    if (objectMeta.sizeBytes) args.reply.header("content-length", String(objectMeta.sizeBytes));
     if (objectMeta.etag) args.reply.header("etag", objectMeta.etag);
     if (objectMeta.lastModified) args.reply.header("last-modified", objectMeta.lastModified.toUTCString());
-    return args.reply.send(rangedObject.body);
+    args.reply.header("accept-ranges", "bytes");
+
+    return sendStream(object.body);
+  } catch (error) {
+    releaseClientCloseListener();
+    if (clientClosed) {
+      finishStream("client_closed", error);
+      return args.reply;
+    }
+    args.reply.request.log.warn({ ...logContext, err: error, durationMs: Date.now() - streamStartedAt }, "object stream could not be opened");
+    throw error;
   }
-
-  const object = await getObjectStream(args.target);
-  if (!object.body) return args.reply.code(404).send({ error: notFoundError });
-
-  args.reply.header("content-type", resolveContentType({ kind: args.kind, objectKey: args.target.objectKey, contentType: object.contentType ?? contentType }));
-  if (objectMeta.sizeBytes) args.reply.header("content-length", String(objectMeta.sizeBytes));
-  if (objectMeta.etag) args.reply.header("etag", objectMeta.etag);
-  if (objectMeta.lastModified) args.reply.header("last-modified", objectMeta.lastModified.toUTCString());
-  args.reply.header("accept-ranges", "bytes");
-
-  return args.reply.send(object.body);
 }
 

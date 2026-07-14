@@ -206,6 +206,11 @@ const TIME_DISPLAY_OPTIONS: Array<{ value: TimeDisplayMode; label: string; descr
 const UI_HIDE_DELAY_MS = 2000;
 const ICON_STROKE = 1.75;
 const PLAYBACK_RETRY_DELAYS_MS = [0, 750, 2000];
+const PLAYBACK_STALL_CHECK_INTERVAL_MS = 1000;
+const PLAYBACK_STALL_TIMEOUT_MS = 10000;
+const PLAYBACK_STALL_PROGRESS_EPSILON_SECONDS = 0.05;
+const PLAYBACK_STALL_MAX_AUTOMATIC_RECOVERIES = 3;
+const PLAYBACK_STABLE_RESET_MS = 30000;
 const VIDEO_METADATA_TIMEOUT_MS = 15000;
 const SESSION_REFRESH_RETRY_MS = 60000;
 const PLAYBACK_PROGRESS_SAVE_STEP_SECONDS = 5;
@@ -1044,6 +1049,13 @@ function PlayerPageInner() {
     playbackIntentRef.current = false;
     setPlaybackRecoveryStatus("idle");
     playbackEventStatsRef.current = createPlaybackEventStats();
+    let stallWatchdogId: number | null = null;
+    let stallStartedAt = performance.now();
+    let lastObservedCurrentTime = currentVideo.currentTime || 0;
+    let lastObservedBufferedEnd = 0;
+    let automaticRecoveryCount = 0;
+    let watchdogRecoveryPending = false;
+    let healthyPlaybackStartedAt: number | null = null;
     if (playbackProgressRestoredKeyRef.current !== playbackProgressKey) {
       playbackProgressRestoredKeyRef.current = null;
       lastStoredPlaybackPositionRef.current = null;
@@ -1082,7 +1094,7 @@ function PlayerPageInner() {
     function markPlaybackEvent(eventName: PlaybackEventName) {
       playbackEventStatsRef.current = recordPlaybackEvent(playbackEventStatsRef.current, eventName);
     }
-    function syncBuffered() {
+    function readBufferedEnd() {
       const ranges = currentVideo.buffered;
       const current = currentVideo.currentTime || 0;
       let nextBufferedEnd = 0;
@@ -1095,7 +1107,79 @@ function PlayerPageInner() {
         }
         nextBufferedEnd = Math.max(nextBufferedEnd, end);
       }
+      return nextBufferedEnd;
+    }
+    function syncBuffered() {
+      const nextBufferedEnd = readBufferedEnd();
       setBufferedEnd(nextBufferedEnd);
+      return nextBufferedEnd;
+    }
+    function resetStallObservation() {
+      stallStartedAt = performance.now();
+      lastObservedCurrentTime = currentVideo.currentTime || 0;
+      lastObservedBufferedEnd = readBufferedEnd();
+    }
+    function stopStallWatchdog() {
+      if (stallWatchdogId !== null) window.clearInterval(stallWatchdogId);
+      stallWatchdogId = null;
+      healthyPlaybackStartedAt = null;
+      resetStallObservation();
+    }
+    function startStallWatchdog() {
+      if (stallWatchdogId !== null) return;
+      resetStallObservation();
+      stallWatchdogId = window.setInterval(() => void inspectPlaybackProgress(), PLAYBACK_STALL_CHECK_INTERVAL_MS);
+    }
+    async function inspectPlaybackProgress() {
+      if (
+        !playbackIntentRef.current
+        || currentVideo.paused
+        || currentVideo.ended
+        || currentVideo.seeking
+        || document.visibilityState !== "visible"
+      ) {
+        resetStallObservation();
+        return;
+      }
+
+      const observedCurrentTime = currentVideo.currentTime || 0;
+      const observedBufferedEnd = readBufferedEnd();
+      const playbackAdvanced = observedCurrentTime > lastObservedCurrentTime + PLAYBACK_STALL_PROGRESS_EPSILON_SECONDS;
+      const bufferAdvanced = observedBufferedEnd > lastObservedBufferedEnd + PLAYBACK_STALL_PROGRESS_EPSILON_SECONDS;
+      if (playbackAdvanced || bufferAdvanced) {
+        stallStartedAt = performance.now();
+        lastObservedCurrentTime = observedCurrentTime;
+        lastObservedBufferedEnd = observedBufferedEnd;
+        if (healthyPlaybackStartedAt === null) healthyPlaybackStartedAt = performance.now();
+        if (automaticRecoveryCount > 0 && performance.now() - healthyPlaybackStartedAt >= PLAYBACK_STABLE_RESET_MS) {
+          automaticRecoveryCount = 0;
+        }
+        return;
+      }
+
+      healthyPlaybackStartedAt = null;
+      if (performance.now() - stallStartedAt < PLAYBACK_STALL_TIMEOUT_MS || watchdogRecoveryPending) return;
+      if (automaticRecoveryCount >= PLAYBACK_STALL_MAX_AUTOMATIC_RECOVERIES) {
+        setPlaybackRecoveryStatus("failed");
+        setIsBuffering(false);
+        stopStallWatchdog();
+        return;
+      }
+
+      automaticRecoveryCount += 1;
+      watchdogRecoveryPending = true;
+      stallStartedAt = performance.now();
+      try {
+        const recovered = await recoverPlayback(currentVideo);
+        if (!recovered && automaticRecoveryCount >= PLAYBACK_STALL_MAX_AUTOMATIC_RECOVERIES) {
+          setPlaybackRecoveryStatus("failed");
+          stopStallWatchdog();
+        } else {
+          resetStallObservation();
+        }
+      } finally {
+        watchdogRecoveryPending = false;
+      }
     }
     function syncTime() {
       setCurrentTime(currentVideo.currentTime || 0);
@@ -1159,29 +1243,36 @@ function PlayerPageInner() {
       markPlaybackEvent("playing");
       setPlaybackRecoveryStatus("idle");
       stopBuffering();
+      healthyPlaybackStartedAt = performance.now();
+      startStallWatchdog();
     }
     function onSeeking() {
       markPlaybackEvent("seeking");
+      resetStallObservation();
       syncBuffered();
     }
     function onSeeked() {
       markPlaybackEvent("seeked");
+      resetStallObservation();
       stopBuffering();
     }
     function onPlay() {
       markPlaybackEvent("play");
       playbackIntentRef.current = true;
+      startStallWatchdog();
       syncState();
     }
     function onPause() {
       markPlaybackEvent("pause");
       if (!currentVideo.error) playbackIntentRef.current = false;
+      if (!playbackRecoveryRef.current) stopStallWatchdog();
       persistPlaybackProgress(true);
       syncState();
     }
     function onEnded() {
       markPlaybackEvent("ended");
       playbackIntentRef.current = false;
+      stopStallWatchdog();
       if (playbackProgressKey) clearStoredPlaybackProgress(playbackProgressKey);
       lastStoredPlaybackPositionRef.current = null;
       stopBuffering();
@@ -1231,6 +1322,7 @@ function PlayerPageInner() {
     window.addEventListener("pagehide", onPageHide);
     return () => {
       persistPlaybackProgress(true);
+      stopStallWatchdog();
       currentVideo.pause();
       playbackIntentRef.current = false;
       currentVideo.removeEventListener("loadstart", onLoadStart);

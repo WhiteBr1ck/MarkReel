@@ -1,7 +1,7 @@
 {
   "name": "@markreel/api",
   "private": true,
-  "version": "0.2.14",
+  "version": "0.2.15",
   "scripts": {
     "start:dev": "tsx watch src/main.ts",
     "db:generate": "prisma generate",
@@ -12,6 +12,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.758.0",
     "@aws-sdk/s3-request-presigner": "^3.758.0",
+    "@smithy/node-http-handler": "^4.4.16",
     "@fastify/cookie": "^9.4.0",
     "@fastify/cors": "^9.0.0",
     "@fastify/jwt": "^8.0.0",

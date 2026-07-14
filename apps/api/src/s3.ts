@@ -9,6 +9,7 @@ import {
 } from "@aws-sdk/client-s3";
 import type { S3ServiceException } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
 import type { FastifyRequest } from "fastify";
 import { Readable } from "node:stream";
 import { env } from "./env";
@@ -17,6 +18,10 @@ export const s3 = new S3Client({
   region: env.S3_REGION,
   endpoint: env.S3_ENDPOINT,
   forcePathStyle: true,
+  requestHandler: new NodeHttpHandler({
+    connectionTimeout: 5000,
+    socketTimeout: 20000
+  }),
   credentials: {
     accessKeyId: env.S3_ACCESS_KEY,
     secretAccessKey: env.S3_SECRET_KEY
@@ -162,13 +167,15 @@ export async function getObjectStream(args: {
   bucket: string;
   objectKey: string;
   range?: string;
+  abortSignal?: AbortSignal;
 }) {
   const res = await s3.send(
     new GetObjectCommand({
       Bucket: args.bucket,
       Key: args.objectKey,
       Range: args.range
-    })
+    }),
+    args.abortSignal ? { abortSignal: args.abortSignal } : undefined
   );
 
   return {
