@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { IconChevron } from "../_components/icons";
 import { api } from "../_components/api";
 import { clearAllStoredPlaybackProgress } from "../_components/playback-progress";
-import { type Accent, type Language, type Theme, useUiPreferences } from "../_components/theme";
+import { type Accent, type DefaultOrganizationProjectPermission, type Language, type Theme, useUiPreferences } from "../_components/theme";
 
 function sanitizeWorkbenchHref(value: string | null): string {
   if (!value) return "/app";
@@ -22,6 +22,7 @@ function sanitizeWorkbenchHref(value: string | null): string {
 const ACCENTS: Accent[] = ["clay", "blue", "green", "violet", "amber"];
 const LANGUAGES: Language[] = ["zh-CN", "en"];
 const THEMES: Theme[] = ["dark", "light", "system"];
+const ORGANIZATION_PROJECT_PERMISSIONS: DefaultOrganizationProjectPermission[] = ["none", "view", "upload", "manage"];
 
 type MeResponse = { user: { id: string } | null };
 
@@ -90,6 +91,16 @@ export default function SettingsPage() {
       system: labels.common.system
     }),
     [labels.common]
+  );
+
+  const organizationPermissionLabelMap = useMemo(
+    () => ({
+      none: labels.settings.organizationPermissionNone,
+      view: labels.settings.organizationPermissionView,
+      upload: labels.settings.organizationPermissionUpload,
+      manage: labels.settings.organizationPermissionManage
+    }),
+    [labels.settings]
   );
 
   if (!authReady) return null;
@@ -236,6 +247,29 @@ export default function SettingsPage() {
                   <span className="mr-page__toggle-knob" />
                 </span>
               </button>
+
+              <div className="mr-page__choice">
+                <div className="mr-page__choice-copy">
+                  <strong>{labels.settings.defaultOrganizationProjectPermission}</strong>
+                  <small>{labels.settings.defaultOrganizationProjectPermissionNote}</small>
+                </div>
+                <div className="mr-page__actions" role="group" aria-label={labels.settings.defaultOrganizationProjectPermission}>
+                  {ORGANIZATION_PROJECT_PERMISSIONS.map((permission) => {
+                    const active = preferences.defaultOrganizationProjectPermission === permission;
+                    return (
+                      <button
+                        key={permission}
+                        type="button"
+                        className={`mr-btn mr-btn--surface mr-page__choice-option${active ? " mr-page__choice-option--active" : ""}`}
+                        aria-pressed={active}
+                        onClick={() => patchPreferences({ defaultOrganizationProjectPermission: permission })}
+                      >
+                        {organizationPermissionLabelMap[permission]}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           </section>
         </div>

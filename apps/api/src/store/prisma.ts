@@ -1,4 +1,4 @@
-import type { Store, StoreProject, StoreUser, StoreUserProfile } from "./types";
+import type { Store, StoreProject, StoreProjectPermission, StoreUser, StoreUserProfile } from "./types";
 import { capabilitiesForRole, getProjectAccess, type ProjectRole } from "../access";
 import { createRandomAvatarPreset } from "../avatarPresets";
 import { prisma } from "../db";
@@ -366,8 +366,14 @@ export function createPrismaStore(): Store {
       return Promise.all(rows.map((row) => withResolvedProjectAccess(row, userId)));
     },
 
-    async projectCreate({ userId, name, organizationId }) {
+    async projectCreate({ userId, name, organizationId, organizationPermission }) {
       const effectiveOrganizationId = organizationId ?? await defaultOrganizationForUser(userId);
+      const permissionGrants: Array<{ subjectType: "creator" | "organization"; subjectKey: string; permission: StoreProjectPermission }> = [
+        ...(["manage", "upload", "view"] as StoreProjectPermission[]).map((permission) => ({ subjectType: "creator" as const, subjectKey: "", permission }))
+      ];
+      if (organizationPermission) {
+        permissionGrants.push({ subjectType: "organization", subjectKey: "", permission: organizationPermission });
+      }
       const project = await prisma.project.create({
         data: {
           name,
@@ -380,7 +386,7 @@ export function createPrismaStore(): Store {
             }
           },
           permissionGrants: {
-            create: ["manage", "upload", "view"].map((permission) => ({ subjectType: "creator", subjectKey: "", permission: permission as any }))
+            create: permissionGrants
           }
         },
         select: {

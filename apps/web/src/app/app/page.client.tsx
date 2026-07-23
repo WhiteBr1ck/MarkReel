@@ -10,6 +10,7 @@ import { formatBytes, formatDuration } from "./_components/workspaceMock";
 import { IconChevron, IconFolder, IconSearch, IconSort, IconVideo } from "./_components/icons";
 import { useUiPreferences } from "./_components/theme";
 import { api } from "./_components/api";
+import { placeAnchoredMenu } from "./_components/context-menu-position";
 
 const VIDEO_FILE_EXTENSIONS = ["mp4", "mov", "m4v", "webm", "mkv", "avi", "mts", "m2ts", "ts", "wmv", "flv", "mpeg", "mpg", "3gp", "3g2"];
 const VIDEO_FILE_ACCEPT = ["video/*", ...VIDEO_FILE_EXTENSIONS.map((extension) => `.${extension}`)].join(",");
@@ -597,7 +598,8 @@ function toZhError(e: any): string {
     import_path_not_file: "请选择一个视频文件，而不是文件夹",
     unsupported_video_format: "暂不支持这个视频格式，请选择 MP4、MOV、MKV、AVI、WEBM 等常见视频文件",
     server_import_failed: "服务器路径导入失败，请查看 API 日志",
-    server_import_timeout: "服务器路径导入超时，请检查挂载目录、MinIO 和视频文件是否可读取"
+    server_import_timeout: "服务器路径导入超时，请检查挂载目录、MinIO 和视频文件是否可读取",
+    permissions_require_persistent_store: "当前存储模式不支持项目默认权限，请切换到 Prisma 存储"
   };
   return map[code] ?? code;
 }
@@ -1057,10 +1059,12 @@ export default function AppClient() {
     window.addEventListener("click", closeMenu);
     window.addEventListener("contextmenu", closeMenu);
     window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
     return () => {
       window.removeEventListener("click", closeMenu);
       window.removeEventListener("contextmenu", closeMenu);
       window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
     };
   }, [contextMenu, sortMenuOpen]);
 
@@ -1350,13 +1354,34 @@ export default function AppClient() {
   function openContextMenu(event: ReactMouseEvent, target: "workspace" | "project_area" | WorkspaceItem | { kind: "folder_tree"; id: string; name: string } | { kind: "project"; id: string; name: string; ownerId: string }) {
     event.preventDefault();
     const menuWidth = 200;
-    const menuHeight = target === "workspace" || target === "project_area" ? 56 : 180;
+    const menuHeight = estimatedContextMenuHeight(target);
     const x = Math.min(event.clientX, window.innerWidth - menuWidth - 12);
     const y = Math.min(event.clientY, window.innerHeight - menuHeight - 12);
     const nextX = Math.max(12, x);
     const nextY = Math.max(12, y);
 
     setContextMenu({ x: nextX, y: nextY, target });
+  }
+
+  function estimatedContextMenuHeight(target: ContextMenuState["target"]) {
+    if (target === "workspace" || target === "project_area") return 60;
+    if (target.kind === "project" || target.kind === "folder_tree") return 152;
+    if (scope === "trash") return 108;
+    if (target.kind === "video") return 300;
+    return 152;
+  }
+
+  function openAnchoredContextMenu(event: ReactMouseEvent<HTMLButtonElement>, target: ContextMenuState["target"]) {
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position = placeAnchoredMenu({
+      anchor: rect,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      menuWidth: 200,
+      menuHeight: estimatedContextMenuHeight(target)
+    });
+    setContextMenu({ x: position.x, y: position.y, target });
   }
 
   function showFeedback(tone: FeedbackTone, message: string) {
@@ -1573,7 +1598,10 @@ export default function AppClient() {
     setErr(null);
     setBusy(true);
     try {
-      await api("/projects", { method: "POST", body: JSON.stringify({ name }) });
+      const organizationPermission = preferences.defaultOrganizationProjectPermission === "none"
+        ? null
+        : preferences.defaultOrganizationProjectPermission;
+      await api("/projects", { method: "POST", body: JSON.stringify({ name, organizationPermission }) });
       await refreshWorkspaces();
       setDialog(null);
     } catch (e: any) {
@@ -3203,9 +3231,10 @@ export default function AppClient() {
                 </div>
               </div>
 
-              <div className="mr-side-section" onContextMenu={(event) => openContextMenu(event, "project_area")}>
-                <div className="mr-side-section__title">我的项目</div>
-                <div style={{ display: "grid", gap: 8 }}>
+              <div className="mr-project-list-scroll" onContextMenu={(event) => openContextMenu(event, "project_area")}>
+                <div className="mr-side-section">
+                  <div className="mr-side-section__title">我的项目</div>
+                  <div style={{ display: "grid", gap: 8 }}>
                   {myProjects.length === 0 ? (
                     <div className="mr-panel" style={{ padding: 12, boxShadow: "none", color: "var(--muted)", lineHeight: 1.6 }}>
                       还没有项目，先创建一个开始整理视频素材。
@@ -3241,15 +3270,7 @@ export default function AppClient() {
                             type="button"
                             className="mr-project-row__menu"
                             aria-label={`项目菜单：${project.name}`}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              const rect = event.currentTarget.getBoundingClientRect();
-                              setContextMenu({
-                                x: rect.right - 180,
-                                y: rect.bottom + 8,
-                                target: { kind: "project", id: project.id, name: project.name, ownerId: project.ownerId }
-                              });
-                            }}
+                            onClick={(event) => openAnchoredContextMenu(event, { kind: "project", id: project.id, name: project.name, ownerId: project.ownerId })}
                           >
                             •••
                           </button>
@@ -3257,12 +3278,12 @@ export default function AppClient() {
                       );
                     })
                   )}
+                  </div>
                 </div>
-              </div>
 
-              <div className="mr-side-section">
-                <div className="mr-side-section__title">{user?.globalRole === "admin" ? "管理项目" : "参与项目"}</div>
-                {sharedProjects.length === 0 ? (
+                <div className="mr-side-section">
+                  <div className="mr-side-section__title">{user?.globalRole === "admin" ? "管理项目" : "参与项目"}</div>
+                  {sharedProjects.length === 0 ? (
                   <div className="mr-panel" style={{ padding: 12, boxShadow: "none", color: "var(--muted)", lineHeight: 1.6 }}>
                     {user?.globalRole === "admin" ? "暂无其他用户项目。" : "暂无参与项目，后续这里会展示你加入的项目。"}
                   </div>
@@ -3298,15 +3319,7 @@ export default function AppClient() {
                             type="button"
                             className="mr-project-row__menu"
                             aria-label={`项目菜单：${project.name}`}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              const rect = event.currentTarget.getBoundingClientRect();
-                              setContextMenu({
-                                x: rect.right - 180,
-                                y: rect.bottom + 8,
-                                target: { kind: "project", id: project.id, name: project.name, ownerId: project.ownerId }
-                              });
-                            }}
+                            onClick={(event) => openAnchoredContextMenu(event, { kind: "project", id: project.id, name: project.name, ownerId: project.ownerId })}
                           >
                             •••
                           </button>
@@ -3314,7 +3327,8 @@ export default function AppClient() {
                       );
                     })}
                   </div>
-                )}
+                  )}
+                </div>
               </div>
             </>
           }
@@ -3574,11 +3588,7 @@ export default function AppClient() {
                             type="button"
                             className="mr-item-action mr-item-row__menu"
                             aria-label={`条目菜单：${it.name}`}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              const rect = event.currentTarget.getBoundingClientRect();
-                              setContextMenu({ x: Math.max(12, rect.right - 180), y: Math.max(12, rect.bottom + 8), target: it });
-                            }}
+                            onClick={(event) => openAnchoredContextMenu(event, it)}
                           >
                             <span aria-hidden="true">⋯</span>
                           </button>
@@ -3644,11 +3654,7 @@ export default function AppClient() {
                             type="button"
                             className="mr-item-action mr-item-action--overlay mr-card-button__menu"
                             aria-label={`条目菜单：${it.name}`}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              const rect = event.currentTarget.getBoundingClientRect();
-                              setContextMenu({ x: Math.max(12, rect.right - 180), y: Math.max(12, rect.bottom + 8), target: it });
-                            }}
+                            onClick={(event) => openAnchoredContextMenu(event, it)}
                           >
                             <span aria-hidden="true">⋯</span>
                           </button>
@@ -3660,15 +3666,10 @@ export default function AppClient() {
               </div>
               {contextMenu ? (
                 <div
-                  className="mr-panel"
+                  className="mr-panel mr-context-menu"
                   style={{
-                    position: "fixed",
-                    left: Math.max(12, contextMenu.x),
-                    top: Math.max(12, contextMenu.y),
-                    width: 200,
-                    padding: 8,
-                    zIndex: 40,
-                    boxShadow: "var(--shadow)"
+                    left: contextMenu.x,
+                    top: contextMenu.y
                   }}
                   onClick={(event) => event.stopPropagation()}
                 >

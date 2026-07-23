@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 export type Theme = "dark" | "light" | "system";
 export type Accent = "clay" | "blue" | "green" | "violet" | "amber";
 export type Language = "zh-CN" | "en";
+export type DefaultOrganizationProjectPermission = "none" | "view" | "upload" | "manage";
 
 type ResolvedTheme = "dark" | "light";
 
@@ -15,6 +16,7 @@ export type UiPreferences = {
   showUploadQueue: boolean;
   defaultInspectorOpen: boolean;
   rememberPlaybackPosition: boolean;
+  defaultOrganizationProjectPermission: DefaultOrganizationProjectPermission;
 };
 
 type BooleanPreferenceKey = "showUploadQueue" | "defaultInspectorOpen" | "rememberPlaybackPosition";
@@ -25,7 +27,8 @@ const STORAGE_KEYS = {
   language: "mr_language",
   showUploadQueue: "mr_show_upload_queue",
   defaultInspectorOpen: "mr_default_inspector_open",
-  rememberPlaybackPosition: "mr_remember_playback_position"
+  rememberPlaybackPosition: "mr_remember_playback_position",
+  defaultOrganizationProjectPermission: "mr_default_organization_project_permission"
 } as const;
 
 const DEFAULT_PREFERENCES: UiPreferences = {
@@ -34,11 +37,13 @@ const DEFAULT_PREFERENCES: UiPreferences = {
   language: "zh-CN",
   showUploadQueue: true,
   defaultInspectorOpen: true,
-  rememberPlaybackPosition: true
+  rememberPlaybackPosition: true,
+  defaultOrganizationProjectPermission: "none"
 };
 
 const ACCENTS: Accent[] = ["clay", "blue", "green", "violet", "amber"];
 const LANGUAGES: Language[] = ["zh-CN", "en"];
+const DEFAULT_ORGANIZATION_PROJECT_PERMISSIONS: DefaultOrganizationProjectPermission[] = ["none", "view", "upload", "manage"];
 
 function resolveTheme(theme: Theme): ResolvedTheme {
   if (theme !== "system") return theme;
@@ -88,6 +93,13 @@ export function getStoredBooleanPreference(key: BooleanPreferenceKey, fallback: 
   return fallback;
 }
 
+export function getStoredDefaultOrganizationProjectPermission(): DefaultOrganizationProjectPermission {
+  const saved = localStorage.getItem(STORAGE_KEYS.defaultOrganizationProjectPermission);
+  return DEFAULT_ORGANIZATION_PROJECT_PERMISSIONS.includes(saved as DefaultOrganizationProjectPermission)
+    ? saved as DefaultOrganizationProjectPermission
+    : DEFAULT_PREFERENCES.defaultOrganizationProjectPermission;
+}
+
 export function getStoredPreferences(): UiPreferences {
   return {
     theme: getStoredTheme(),
@@ -95,7 +107,8 @@ export function getStoredPreferences(): UiPreferences {
     language: getStoredLanguage(),
     showUploadQueue: getStoredBooleanPreference("showUploadQueue", DEFAULT_PREFERENCES.showUploadQueue),
     defaultInspectorOpen: getStoredBooleanPreference("defaultInspectorOpen", DEFAULT_PREFERENCES.defaultInspectorOpen),
-    rememberPlaybackPosition: getStoredBooleanPreference("rememberPlaybackPosition", DEFAULT_PREFERENCES.rememberPlaybackPosition)
+    rememberPlaybackPosition: getStoredBooleanPreference("rememberPlaybackPosition", DEFAULT_PREFERENCES.rememberPlaybackPosition),
+    defaultOrganizationProjectPermission: getStoredDefaultOrganizationProjectPermission()
   };
 }
 
@@ -122,6 +135,7 @@ export function setStoredPreferences(next: UiPreferences) {
   setStoredBooleanPreference("showUploadQueue", next.showUploadQueue);
   setStoredBooleanPreference("defaultInspectorOpen", next.defaultInspectorOpen);
   setStoredBooleanPreference("rememberPlaybackPosition", next.rememberPlaybackPosition);
+  localStorage.setItem(STORAGE_KEYS.defaultOrganizationProjectPermission, next.defaultOrganizationProjectPermission);
 }
 
 export function applyStoredPreferences() {
@@ -235,7 +249,13 @@ function buildLanguagePack(language: Language) {
         workspaceNote: "",
         showUploadQueue: "Show upload queue",
         defaultInspectorOpen: "Open inspector by default",
-        rememberPlaybackPosition: "Remember video progress"
+        rememberPlaybackPosition: "Remember video progress",
+        defaultOrganizationProjectPermission: "Organization access for new projects",
+        defaultOrganizationProjectPermissionNote: "Applied only when a new project is created.",
+        organizationPermissionNone: "No access",
+        organizationPermissionView: "View",
+        organizationPermissionUpload: "Upload",
+        organizationPermissionManage: "Manage"
       },
       common: {
         dark: "Dark",
@@ -289,8 +309,14 @@ function buildLanguagePack(language: Language) {
       workspaceTitle: "默认行为",
       workspaceNote: "",
       showUploadQueue: "显示上传队列",
-      defaultInspectorOpen: "默认开启检查器面板",
-      rememberPlaybackPosition: "记住视频播放进度"
+        defaultInspectorOpen: "默认开启检查器面板",
+        rememberPlaybackPosition: "记住视频播放进度",
+        defaultOrganizationProjectPermission: "新项目的组织成员权限",
+        defaultOrganizationProjectPermissionNote: "仅影响之后创建的项目，已有项目权限不会改变。",
+        organizationPermissionNone: "不自动授权",
+        organizationPermissionView: "查看",
+        organizationPermissionUpload: "上传",
+        organizationPermissionManage: "管理"
     },
     common: {
       dark: "深色",

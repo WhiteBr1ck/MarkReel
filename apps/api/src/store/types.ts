@@ -1,5 +1,6 @@
 export type UserGlobalRole = "admin" | "user";
 export type StoreProjectRole = "owner" | "editor" | "commenter" | "viewer";
+export type StoreProjectPermission = "manage" | "upload" | "view";
 
 export type StoreUser = {
   id: string;
@@ -101,7 +102,7 @@ export type Store = {
   adminRestoreUser(args: { userId: string }): Promise<StoreUser | null>;
 
   projectListForUser(userId: string): Promise<StoreProject[]>;
-  projectCreate(args: { userId: string; name: string; organizationId?: string | null }): Promise<StoreProject>;
+  projectCreate(args: { userId: string; name: string; organizationId?: string | null; organizationPermission?: StoreProjectPermission | null }): Promise<StoreProject>;
   projectGetForUser(args: { userId: string; projectId: string }): Promise<StoreProject | null>;
   projectRenameForUser(args: { userId: string; projectId: string; name: string }): Promise<StoreProject | null>;
   projectDeleteForUser(args: { userId: string; projectId: string }): Promise<StoreProject | null>;

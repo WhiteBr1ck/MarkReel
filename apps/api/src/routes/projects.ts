@@ -9,7 +9,8 @@ import { serializeSizeBytes } from "../mediaSerialization";
 
 const CreateProjectSchema = z.object({
   name: z.string().min(1).max(120),
-  organizationId: z.string().optional().nullable()
+  organizationId: z.string().optional().nullable(),
+  organizationPermission: z.enum(["manage", "upload", "view"]).optional().nullable()
 });
 
 const UpdateProjectSchema = z.object({
@@ -82,7 +83,15 @@ export async function projectRoutes(app: FastifyInstance) {
     const input = CreateProjectSchema.parse(req.body);
 
     const store = getStore();
-    const project = await store.projectCreate({ userId, name: input.name, organizationId: input.organizationId ?? null });
+    if (input.organizationPermission && store.kind === "inmemory") {
+      return reply.code(400).send({ error: "permissions_require_persistent_store" });
+    }
+    const project = await store.projectCreate({
+      userId,
+      name: input.name,
+      organizationId: input.organizationId ?? null,
+      organizationPermission: input.organizationPermission ?? null
+    });
 
     await auditLog({
       req,
@@ -90,7 +99,7 @@ export async function projectRoutes(app: FastifyInstance) {
       action: "project.create",
       entityType: "Project",
       entityId: project.id,
-      meta: { name: project.name }
+      meta: { name: project.name, organizationPermission: input.organizationPermission ?? null }
     });
 
     return reply.code(201).send({ project });

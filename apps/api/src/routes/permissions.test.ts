@@ -215,13 +215,18 @@ test("media annotate permission can complete any annotation", async () => {
       method: "POST",
       url: "/api/projects",
       headers: { cookie: owner.cookies },
-      payload: { name: "Permission Project" }
+      payload: { name: "Permission Project", organizationPermission: "view" }
     });
     assert.equal(projectResponse.statusCode, 201);
     const projectId = projectResponse.json().project.id as string;
 
     const project = await prisma.project.findUnique({ where: { id: projectId }, select: { organizationId: true } });
     assert.ok(project?.organizationId);
+    const defaultOrganizationGrant = await prisma.projectPermissionGrant.findFirst({
+      where: { projectId, subjectType: "organization" },
+      select: { permission: true }
+    });
+    assert.equal(defaultOrganizationGrant?.permission, "view");
     await Promise.all([annotator.user.id, viewer.user.id].map((userId) => prisma.organizationMember.upsert({
       where: { organizationId_userId: { organizationId: project.organizationId!, userId } },
       update: {},
