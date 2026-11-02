@@ -119,6 +119,21 @@ export function createPrismaStore(): Store {
   return {
     kind: "db",
 
+    async apiTokenCreate(args) { return prisma.apiAccessToken.create({ data: args }); },
+    async apiTokenList(userId) {
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { sessionVersion: true } });
+      if (!user) return [];
+      return prisma.apiAccessToken.findMany({ where: { userId, revokedAt: null, sessionVersion: user.sessionVersion }, orderBy: { createdAt: "desc" } });
+    },
+    async apiTokenFind(tokenHash) { return prisma.apiAccessToken.findUnique({ where: { tokenHash } }); },
+    async apiTokenRevoke({ userId, tokenId }) {
+      const result = await prisma.apiAccessToken.updateMany({ where: { id: tokenId, userId, revokedAt: null }, data: { revokedAt: new Date() } });
+      return result.count > 0;
+    },
+    async apiTokenTouch(tokenId) {
+      await prisma.apiAccessToken.updateMany({ where: { id: tokenId, revokedAt: null }, data: { lastUsedAt: new Date() } });
+    },
+
     async userFindByUsername(username) {
       const normalized = username.toLowerCase();
       const u = await prisma.user.findUnique({ where: { username: normalized } });
@@ -151,7 +166,7 @@ export function createPrismaStore(): Store {
           avatarContentType: null,
           avatarPreset: createRandomAvatarPreset(),
           globalRole: args.globalRole ?? "user",
-          sessionVersion: 1,
+          sessionVersion: { increment: 1 },
           disabledAt: null,
           deletedAt: null
         }
@@ -167,6 +182,7 @@ export function createPrismaStore(): Store {
           where: { id: existing.id },
           data: {
             globalRole: "admin",
+            ...(existing.disabledAt || existing.deletedAt ? { sessionVersion: { increment: 1 } } : {}),
             disabledAt: null,
             deletedAt: null
           }
@@ -209,7 +225,7 @@ export function createPrismaStore(): Store {
         where: { id: args.userId },
         data: {
           passwordHash: args.passwordHash,
-          sessionVersion: args.nextSessionVersion
+          sessionVersion: { increment: 1 }
         }
       });
       return toStoreUser(user);
@@ -250,7 +266,7 @@ export function createPrismaStore(): Store {
             avatarContentType: null,
             avatarPreset: createRandomAvatarPreset(),
             globalRole: args.globalRole ?? "user",
-            sessionVersion: 1,
+            sessionVersion: { increment: 1 },
             disabledAt: null,
             deletedAt: null
           }
@@ -290,7 +306,7 @@ export function createPrismaStore(): Store {
         where: { id: args.userId },
         data: {
           passwordHash: args.passwordHash,
-          sessionVersion: args.nextSessionVersion
+          sessionVersion: { increment: 1 }
         }
       });
       return toStoreUser(user);
@@ -299,12 +315,10 @@ export function createPrismaStore(): Store {
     async userSoftDelete(args) {
       const existing = await prisma.user.findUnique({ where: { id: args.userId } });
       if (!existing || existing.deletedAt) return null;
-      const user = await prisma.user.update({
-        where: { id: args.userId },
-        data: {
-          deletedAt: new Date(),
-          sessionVersion: existing.sessionVersion + 1
-        }
+      const user = await prisma.$transaction(async (tx) => {
+        const user = await tx.user.update({ where: { id: args.userId }, data: { deletedAt: new Date(), sessionVersion: { increment: 1 } } });
+        await tx.apiAccessToken.updateMany({ where: { userId: args.userId, revokedAt: null }, data: { revokedAt: new Date() } });
+        return user;
       });
       return toStoreUser(user);
     },
@@ -316,7 +330,7 @@ export function createPrismaStore(): Store {
         where: { id: args.userId },
         data: {
           disabledAt: args.disabled ? new Date() : null,
-          sessionVersion: existing.sessionVersion + 1
+          sessionVersion: { increment: 1 }
         }
       });
       return toStoreUser(user);
@@ -330,7 +344,7 @@ export function createPrismaStore(): Store {
         data: {
           deletedAt: null,
           disabledAt: null,
-          sessionVersion: existing.sessionVersion + 1
+          sessionVersion: { increment: 1 }
         }
       });
       return toStoreUser(user);

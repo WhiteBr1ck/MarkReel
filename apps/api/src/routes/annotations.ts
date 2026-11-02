@@ -7,6 +7,7 @@ import { env } from "../env";
 import { getUserId, requireUser } from "../auth/requireUser";
 import { getAnnotationAccess, getMediaAccess, hasMediaCapability } from "../access";
 import { presignGetObject } from "../s3";
+import { AnnotationHistoryInput, ExpectedAnnotationVersion, applyAnnotationHistory, mutateAnnotationWithHistory, readAnnotationHistory } from "../annotation-history";
 
 const RectSchema = z.object({
   x: z.number().min(0).max(1),
@@ -28,6 +29,7 @@ const AnnotationFilterSchema = z.object({
 });
 
 const CreateAnnotationSchema = z.object({
+  expectedUpdatedAt: ExpectedAnnotationVersion,
   timestampMs: z.number().int().min(0),
   type: z.enum(["pin", "rect", "text"]),
   rect: RectSchema.optional(),
@@ -38,6 +40,7 @@ const CreateAnnotationSchema = z.object({
 });
 
 const UpdateAnnotationSchema = z.object({
+  expectedUpdatedAt: ExpectedAnnotationVersion,
   timestampMs: z.number().int().min(0).optional(),
   body: z.string().max(5000).optional(),
   color: z.string().min(1).max(32).optional(),
@@ -45,6 +48,7 @@ const UpdateAnnotationSchema = z.object({
 });
 
 const CompletionSchema = z.object({
+  expectedUpdatedAt: ExpectedAnnotationVersion,
   completed: z.boolean()
 });
 
@@ -219,13 +223,13 @@ export async function annotationRoutes(app: FastifyInstance) {
     }
     if (input.parentId) {
       const parent = await prisma.annotation.findFirst({
-        where: { id: input.parentId, mediaId, deletedAt: null },
+        where: { id: input.parentId, mediaId, deletedAt: null, parentId: null },
         select: { id: true }
       });
       if (!parent) return reply.code(404).send({ error: "parent_not_found" });
     }
 
-    const ann = await prisma.annotation.create({
+    const ann = await mutateAnnotationWithHistory({ actorId: userId, channel: "user", mediaId, parentId: input.parentId, expectedUpdatedAt: input.expectedUpdatedAt, operation: "create" }, (tx) => tx.annotation.create({
       data: {
         projectId: access.projectId,
         mediaId,
@@ -247,7 +251,7 @@ export async function annotationRoutes(app: FastifyInstance) {
         }
       },
       select: { id: true, parentId: true }
-    });
+    }));
 
     await auditLog({
       req,
@@ -258,7 +262,7 @@ export async function annotationRoutes(app: FastifyInstance) {
       meta: { mediaId, parentId: ann.parentId, hasAttachments: input.attachments.length > 0 }
     });
 
-    return reply.code(201).send({ id: ann.id });
+    return reply.code(201).send(ann);
   });
 
   app.patch("/annotations/:annotationId", { preHandler: requireUser }, async (req, reply) => {
@@ -266,10 +270,11 @@ export async function annotationRoutes(app: FastifyInstance) {
     const annotationId = (req.params as any).annotationId as string;
     const access = await assertAnnotationAccess(userId, annotationId);
     if (!access) return reply.code(404).send({ error: "not_found" });
+    if (!hasMediaCapability(access.mediaAccess, "media:annotate")) return reply.code(403).send({ error: "forbidden" });
     if (access.authorId !== userId && !hasMediaCapability(access.mediaAccess, "media:manage")) return reply.code(403).send({ error: "forbidden" });
 
     const input = UpdateAnnotationSchema.parse(req.body);
-    const annotation = await prisma.annotation.update({
+    const annotation = await mutateAnnotationWithHistory({ actorId: userId, channel: "user", mediaId: access.mediaId, annotationId, expectedUpdatedAt: input.expectedUpdatedAt, operation: "edit" }, (tx) => tx.annotation.update({
       where: { id: annotationId },
       data: {
         ...(input.timestampMs !== undefined ? { timestampMs: input.timestampMs } : {}),
@@ -291,7 +296,7 @@ export async function annotationRoutes(app: FastifyInstance) {
           : {})
       },
       select: { id: true }
-    });
+    }));
 
     await auditLog({
       req,
@@ -302,7 +307,7 @@ export async function annotationRoutes(app: FastifyInstance) {
       meta: { mediaId: access.mediaId }
     });
 
-    return reply.send({ id: annotation.id });
+    return reply.send(annotation);
   });
 
   app.patch("/annotations/:annotationId/completion", { preHandler: requireUser }, async (req, reply) => {
@@ -313,13 +318,13 @@ export async function annotationRoutes(app: FastifyInstance) {
     if (!hasMediaCapability(access.mediaAccess, "media:complete_any_annotation")) return reply.code(403).send({ error: "forbidden" });
 
     const input = CompletionSchema.parse(req.body);
-    const annotation = await prisma.annotation.update({
+    const annotation = await mutateAnnotationWithHistory({ actorId: userId, channel: "user", mediaId: access.mediaId, annotationId, expectedUpdatedAt: input.expectedUpdatedAt, operation: "completion" }, (tx) => tx.annotation.update({
       where: { id: annotationId },
       data: input.completed
         ? { completedAt: new Date(), completedById: userId }
         : { completedAt: null, completedById: null },
       select: { id: true, completedAt: true }
-    });
+    }));
 
     await auditLog({
       req,
@@ -330,7 +335,7 @@ export async function annotationRoutes(app: FastifyInstance) {
       meta: { mediaId: access.mediaId }
     });
 
-    return reply.send({ id: annotation.id, completedAt: annotation.completedAt });
+    return reply.send(annotation);
   });
 
   app.delete("/annotations/:annotationId", { preHandler: requireUser }, async (req, reply) => {
@@ -338,9 +343,11 @@ export async function annotationRoutes(app: FastifyInstance) {
     const annotationId = (req.params as any).annotationId as string;
     const access = await assertAnnotationAccess(userId, annotationId);
     if (!access) return reply.code(404).send({ error: "not_found" });
+    if (!hasMediaCapability(access.mediaAccess, "media:annotate")) return reply.code(403).send({ error: "forbidden" });
     if (access.authorId !== userId && !hasMediaCapability(access.mediaAccess, "media:manage")) return reply.code(403).send({ error: "forbidden" });
 
-    await prisma.$transaction(async (tx) => {
+    const input = z.object({ expectedUpdatedAt: ExpectedAnnotationVersion }).parse(req.body ?? {});
+    const result = await mutateAnnotationWithHistory({ actorId: userId, channel: "user", mediaId: access.mediaId, annotationId, expectedUpdatedAt: input.expectedUpdatedAt, operation: "delete" }, async (tx) => {
       await tx.annotation.updateMany({
         where: { parentId: annotationId, deletedAt: null },
         data: { deletedAt: new Date() }
@@ -349,6 +356,7 @@ export async function annotationRoutes(app: FastifyInstance) {
         where: { id: annotationId },
         data: { deletedAt: new Date() }
       });
+      return { id: annotationId };
     });
 
     await auditLog({
@@ -360,7 +368,24 @@ export async function annotationRoutes(app: FastifyInstance) {
       meta: { mediaId: access.mediaId, parentId: access.parentId }
     });
 
-    return reply.send({ ok: true });
+    return reply.send({ ok: true, ...result });
+  });
+
+  app.post("/annotations/:annotationId/history", { preHandler: requireUser }, async (req, reply) => {
+    const userId = getUserId(req);
+    const { annotationId } = z.object({ annotationId: z.string() }).parse(req.params);
+    const input = AnnotationHistoryInput.parse(req.body);
+    const receipt = readAnnotationHistory(input.historyToken, userId, "user");
+    if (receipt.annotationId !== annotationId) return reply.code(400).send({ error: "invalid_history" });
+    const access = await assertMediaAccess(userId, receipt.mediaId);
+    if (!access) return reply.code(404).send({ error: "not_found" });
+    const allowed = receipt.operation === "completion"
+      ? hasMediaCapability(access.mediaAccess, "media:complete_any_annotation")
+      : hasMediaCapability(access.mediaAccess, "media:manage") || (receipt.authorId === userId && hasMediaCapability(access.mediaAccess, "media:annotate"));
+    if (!allowed) return reply.code(403).send({ error: "forbidden" });
+    const result = await applyAnnotationHistory(receipt);
+    await auditLog({ req, actorUserId: userId, action: "annotation.history", entityType: "Annotation", entityId: annotationId, meta: { mediaId: receipt.mediaId, operation: receipt.operation } });
+    return reply.send(result);
   });
 
   app.get("/annotations/:annotationId/attachments/:attachmentId/preview", { preHandler: requireUser }, async (req, reply) => {

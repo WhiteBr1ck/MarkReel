@@ -14,6 +14,9 @@ import { userRoutes } from "./routes/users";
 import { adminRoutes } from "./routes/admin";
 import { organizationRoutes } from "./routes/organizations";
 import { prisma } from "./db";
+import { apiTokenRoutes } from "./routes/apiTokens";
+import { mcpRoutes } from "./routes/mcp";
+import { integrationRoutes } from "./routes/integrations";
 
 function isStorageUnavailableError(err: unknown) {
   const error = err as {
@@ -175,6 +178,9 @@ export async function buildApp() {
       await adminRoutes(apiScope);
       await organizationRoutes(apiScope);
       await projectRoutes(apiScope);
+      await apiTokenRoutes(apiScope);
+      await mcpRoutes(apiScope);
+      await integrationRoutes(apiScope);
 
       if (env.MARKREEL_STORE !== "inmemory") {
         const { mediaRoutes } = await import("./routes/media");
@@ -184,6 +190,7 @@ export async function buildApp() {
         const { shareLinkRoutes } = await import("./routes/shareLinks");
         const { projectMemberRoutes } = await import("./routes/projectMembers");
         const { objectRoutes } = await import("./routes/objects");
+        const { annotationExportRoutes } = await import("./routes/annotationExports");
         await mediaRoutes(apiScope);
         await folderRoutes(apiScope);
         await annotationRoutes(apiScope);
@@ -191,6 +198,7 @@ export async function buildApp() {
         await shareLinkRoutes(apiScope);
         await projectMemberRoutes(apiScope);
         await objectRoutes(apiScope);
+        await annotationExportRoutes(apiScope);
       }
     },
     { prefix: "/api" }

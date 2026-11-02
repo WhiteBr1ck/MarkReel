@@ -14,6 +14,8 @@ import { sendObjectResponse } from "../objectResponse";
 import { putRequestBodyObject } from "../uploadProxy";
 import { serializeMediaFiles } from "../mediaSerialization";
 import { ensureTechnicalMetadata, technicalMetadataSelect } from "../mediaTechnicalMetadata";
+import { AnnotationHistoryInput, ExpectedAnnotationVersion, applyAnnotationHistory, mutateAnnotationWithHistory, readAnnotationHistory } from "../annotation-history";
+import { hasAnnotationExportShareVisit } from "../annotationExportShareAccess";
 
 const SharePermissionSchema = z.enum(["view", "comment", "annotate"]);
 const ShareAudienceSchema = z.enum(["anyone", "authenticated"]);
@@ -52,6 +54,7 @@ const AttachmentSchema = z.object({
 });
 
 const CreateShareAnnotationSchema = z.object({
+  expectedUpdatedAt: ExpectedAnnotationVersion,
   timestampMs: z.number().int().min(0),
   type: z.enum(["pin", "rect", "text"]),
   rect: RectSchema.optional(),
@@ -62,6 +65,7 @@ const CreateShareAnnotationSchema = z.object({
 });
 
 const UpdateShareAnnotationSchema = z.object({
+  expectedUpdatedAt: ExpectedAnnotationVersion,
   timestampMs: z.number().int().min(0).optional(),
   body: z.string().max(5000).optional(),
   color: z.string().min(1).max(32).optional(),
@@ -69,6 +73,7 @@ const UpdateShareAnnotationSchema = z.object({
 });
 
 const CompletionSchema = z.object({
+  expectedUpdatedAt: ExpectedAnnotationVersion,
   completed: z.boolean()
 });
 
@@ -145,18 +150,27 @@ async function getShareActorUserId(req: any, reply: any) {
 
   const existingGuestId = req.cookies?.[SHARE_GUEST_COOKIE];
   if (existingGuestId) {
-    const guest = await getStore().userFindById(existingGuestId);
-    if (guest && !guest.disabledAt) return guest.id;
+    try {
+      const session = req.server.jwt.verify(existingGuestId);
+      if (session.purpose === "share_guest" && session.si === authInstanceId && typeof session.sub === "string") {
+        const guest = await getStore().userFindById(session.sub);
+        if (guest && !guest.disabledAt && guest.username.startsWith("guest_")) return guest.id;
+      }
+    } catch {
+      // Unsigned legacy IDs are not proof of ownership.
+    }
   }
 
   const suffix = newShareToken().slice(0, 12).toLowerCase();
   const username = `guest_${suffix}`;
   const passwordHash = await hashPassword(newShareToken());
   const guest = await getStore().userCreateOrRevive({ username, passwordHash, displayName: `访客 ${suffix.slice(0, 4)}`, globalRole: "user" });
-  reply.setCookie(SHARE_GUEST_COOKIE, guest.id, {
+  const guestSession = await reply.jwtSign({ sub: guest.id, purpose: "share_guest", si: authInstanceId }, { expiresIn: 60 * 60 * 24 * 30 });
+  reply.setCookie(SHARE_GUEST_COOKIE, guestSession, {
     path: "/",
     httpOnly: true,
     sameSite: "lax",
+    secure: env.WEB_BASE_URL.startsWith("https://"),
     maxAge: 60 * 60 * 24 * 30
   });
   return guest.id;
@@ -287,6 +301,7 @@ async function requireActiveMediaShare(token: string, reply: any) {
     where: { id: shareLinkId ?? "" },
     select: {
       id: true,
+      tokenHash: true,
       label: true,
       audience: true,
       permissions: { select: { permission: true } },
@@ -310,7 +325,7 @@ async function requireActiveMediaShare(token: string, reply: any) {
           createdAt: true,
           updatedAt: true,
           deletedAt: true,
-          project: { select: { organizationId: true } },
+          project: { select: { organizationId: true, deletedAt: true } },
           creator: { select: { id: true, username: true, displayName: true } },
           files: {
             select: {
@@ -343,7 +358,7 @@ async function requireActiveMediaShare(token: string, reply: any) {
   });
 
   const media = link?.media ?? null;
-  if (!link || !link.mediaId || !media || media.deletedAt) {
+  if (!link || !link.mediaId || !media || media.deletedAt || media.project.deletedAt) {
     reply.code(404).send({ error: "not_found" });
     return null;
   }
@@ -355,12 +370,16 @@ async function requireActiveMediaShare(token: string, reply: any) {
     reply.code(410).send({ error: "expired" });
     return null;
   }
-  if (link.maxUses && link.useCount >= link.maxUses) {
+  if (link.maxUses && link.useCount >= link.maxUses && !hasAnnotationExportShareVisit(reply.request, link)) {
     reply.code(410).send({ error: "max_uses_reached" });
     return null;
   }
   if (link.passwordHash) {
     reply.code(401).send({ error: "invalid_share_password" });
+    return null;
+  }
+  if (link.audience === "authenticated" && !await getOptionalUserId(reply.request, reply)) {
+    reply.code(401).send({ error: "unauthorized" });
     return null;
   }
 
@@ -740,10 +759,15 @@ export async function shareLinkRoutes(app: FastifyInstance) {
     const link = await requireActiveMediaShare(token, reply);
     if (!link) return;
 
-    await prisma.shareLink.update({
-      where: { id: link.id },
-      data: { useCount: { increment: 1 }, lastUsedAt: new Date() }
-    });
+    if (!link.maxUses) {
+      await prisma.shareLink.update({ where: { id: link.id }, data: { useCount: { increment: 1 }, lastUsedAt: new Date() } });
+    } else if (!hasAnnotationExportShareVisit(req, link)) {
+      const admitted = await prisma.shareLink.updateMany({
+        where: { id: link.id, useCount: link.useCount, maxUses: link.maxUses, revokedAt: null, expiresAt: link.expiresAt, passwordHash: link.passwordHash, audience: link.audience },
+        data: { useCount: { increment: 1 }, lastUsedAt: new Date() }
+      });
+      if (admitted.count !== 1) return reply.code(410).send({ error: "max_uses_reached" });
+    }
 
     return reply.send({
       share: {
@@ -833,14 +857,14 @@ export async function shareLinkRoutes(app: FastifyInstance) {
     const input = CreateShareAnnotationSchema.parse(req.body);
     const actorUserId = await getShareActorUserId(req, reply);
     if (input.parentId) {
-      const parent = await prisma.annotation.findFirst({ where: { id: input.parentId, mediaId: link.mediaId, deletedAt: null }, select: { id: true } });
+      const parent = await prisma.annotation.findFirst({ where: { id: input.parentId, mediaId: link.mediaId, deletedAt: null, parentId: null }, select: { id: true } });
       if (!parent) return reply.code(404).send({ error: "parent_not_found" });
     }
 
-    const ann = await prisma.annotation.create({
+    const ann = await mutateAnnotationWithHistory({ actorId: actorUserId, channel: `share:${link.id}`, mediaId: link.mediaId, parentId: input.parentId, expectedUpdatedAt: input.expectedUpdatedAt, operation: "create" }, (tx) => tx.annotation.create({
       data: {
         projectId: link.media.projectId,
-        mediaId: link.mediaId,
+        mediaId: link.mediaId!,
         authorId: actorUserId,
         parentId: input.parentId ?? null,
         timestampMs: input.timestampMs,
@@ -859,10 +883,10 @@ export async function shareLinkRoutes(app: FastifyInstance) {
         }
       },
       select: { id: true, parentId: true }
-    });
+    }));
 
     await auditLog({ req, actorUserId, action: ann.parentId ? "share.annotation.reply" : "share.annotation.create", entityType: "Annotation", entityId: ann.id, meta: { mediaId: link.mediaId, shareLinkId: link.id } });
-    return reply.code(201).send({ id: ann.id });
+    return reply.code(201).send(ann);
   });
 
   app.patch("/share/:token/annotations/:annotationId", async (req, reply) => {
@@ -878,7 +902,7 @@ export async function shareLinkRoutes(app: FastifyInstance) {
     if (existing.authorId !== actorUserId) return reply.code(403).send({ error: "forbidden" });
 
     const input = UpdateShareAnnotationSchema.parse(req.body);
-    await prisma.annotation.update({
+    const annotation = await mutateAnnotationWithHistory({ actorId: actorUserId, channel: `share:${link.id}`, mediaId: link.mediaId, annotationId, expectedUpdatedAt: input.expectedUpdatedAt, operation: "edit" }, (tx) => tx.annotation.update({
       where: { id: annotationId },
       data: {
         ...(input.timestampMs !== undefined ? { timestampMs: input.timestampMs } : {}),
@@ -900,10 +924,10 @@ export async function shareLinkRoutes(app: FastifyInstance) {
           : {})
       },
       select: { id: true }
-    });
+    }));
 
     await auditLog({ req, actorUserId, action: "share.annotation.update", entityType: "Annotation", entityId: annotationId, meta: { mediaId: link.mediaId, shareLinkId: link.id } });
-    return reply.send({ id: annotationId });
+    return reply.send(annotation);
   });
 
   app.patch("/share/:token/annotations/:annotationId/completion", async (req, reply) => {
@@ -918,14 +942,14 @@ export async function shareLinkRoutes(app: FastifyInstance) {
     if (!existing) return reply.code(404).send({ error: "not_found" });
 
     const input = CompletionSchema.parse(req.body);
-    const annotation = await prisma.annotation.update({
+    const annotation = await mutateAnnotationWithHistory({ actorId: actorUserId, channel: `share:${link.id}`, mediaId: link.mediaId, annotationId, expectedUpdatedAt: input.expectedUpdatedAt, operation: "completion" }, (tx) => tx.annotation.update({
       where: { id: annotationId },
       data: input.completed ? { completedAt: new Date(), completedById: actorUserId } : { completedAt: null, completedById: null },
       select: { id: true, completedAt: true }
-    });
+    }));
 
     await auditLog({ req, actorUserId, action: input.completed ? "share.annotation.complete" : "share.annotation.reopen", entityType: "Annotation", entityId: annotationId, meta: { mediaId: link.mediaId, shareLinkId: link.id } });
-    return reply.send({ id: annotation.id, completedAt: annotation.completedAt });
+    return reply.send(annotation);
   });
 
   app.delete("/share/:token/annotations/:annotationId", async (req, reply) => {
@@ -940,12 +964,29 @@ export async function shareLinkRoutes(app: FastifyInstance) {
     if (!existing) return reply.code(404).send({ error: "not_found" });
     if (existing.authorId !== actorUserId) return reply.code(403).send({ error: "forbidden" });
 
-    await prisma.$transaction(async (tx) => {
+    const input = z.object({ expectedUpdatedAt: ExpectedAnnotationVersion }).parse(req.body ?? {});
+    const result = await mutateAnnotationWithHistory({ actorId: actorUserId, channel: `share:${link.id}`, mediaId: link.mediaId, annotationId, expectedUpdatedAt: input.expectedUpdatedAt, operation: "delete" }, async (tx) => {
       await tx.annotation.updateMany({ where: { parentId: annotationId, deletedAt: null }, data: { deletedAt: new Date() } });
       await tx.annotation.update({ where: { id: annotationId }, data: { deletedAt: new Date() } });
+      return { id: annotationId };
     });
     await auditLog({ req, actorUserId, action: "share.annotation.delete", entityType: "Annotation", entityId: annotationId, meta: { mediaId: link.mediaId, shareLinkId: link.id } });
-    return reply.send({ ok: true });
+    return reply.send({ ok: true, ...result });
+  });
+
+  app.post("/share/:token/annotations/:annotationId/history", async (req, reply) => {
+    const { token, annotationId } = z.object({ token: z.string(), annotationId: z.string() }).parse(req.params);
+    const link = await requireActiveMediaShare(token, reply);
+    if (!link || !link.mediaId) return;
+    if (!canShareAnnotate(link.serializedPermissions)) return reply.code(403).send({ error: "forbidden" });
+    const actorUserId = await getShareActorUserId(req, reply);
+    const input = AnnotationHistoryInput.parse(req.body);
+    const receipt = readAnnotationHistory(input.historyToken, actorUserId, `share:${link.id}`);
+    if (receipt.annotationId !== annotationId || receipt.mediaId !== link.mediaId) return reply.code(400).send({ error: "invalid_history" });
+    if (receipt.operation !== "completion" && receipt.authorId !== actorUserId) return reply.code(403).send({ error: "forbidden" });
+    const result = await applyAnnotationHistory(receipt);
+    await auditLog({ req, actorUserId, action: "share.annotation.history", entityType: "Annotation", entityId: annotationId, meta: { mediaId: link.mediaId, shareLinkId: link.id, operation: receipt.operation } });
+    return reply.send(result);
   });
 
   app.post("/share/:token/attachments/presign", async (req, reply) => {

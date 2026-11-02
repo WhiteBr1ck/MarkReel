@@ -20,11 +20,13 @@ import { getMediaAccess, getProjectAccess, hasCapability, hasMediaCapability } f
 import { mediaQueue } from "../queue";
 import { serializeMediaFiles, serializeMediaMetadata, serializeSizeBytes } from "../mediaSerialization";
 import { ensureTechnicalMetadata, technicalMetadataSelect } from "../mediaTechnicalMetadata";
+import { authorizeMediaVersionTarget, createMediaVersion, deleteMediaSeries, getMediaVersionHistory, MediaSeriesError } from "../mediaSeries";
 
 const CreateMediaSchema = z.object({
-  title: z.string().min(1).max(200),
+  title: z.string().trim().min(1).max(200),
   folderId: z.string().optional().nullable(),
-  seriesId: z.string().optional()
+  seriesId: z.string().trim().min(1).optional(),
+  sourceMediaId: z.string().trim().min(1).optional()
 });
 
 const UpdateMediaSchema = z.object({
@@ -91,6 +93,8 @@ const ServerImportSchema = z.object({
   path: z.string().min(1),
   title: z.string().trim().min(1).max(200).optional(),
   folderId: z.string().optional().nullable(),
+  seriesId: z.string().trim().min(1).optional(),
+  sourceMediaId: z.string().trim().min(1).optional(),
   mode: z.enum(["original", "compress"]).default("compress"),
   transcode: TranscodeSchema.optional()
 });
@@ -657,30 +661,10 @@ export async function mediaRoutes(app: FastifyInstance) {
       const folderOk = await assertFolderAccess(projectId, input.folderId ?? null);
       if (!folderOk) return reply.code(404).send({ error: "folder_not_found" });
 
-      const title = await makeUniqueMediaTitle({ projectId, folderId: input.folderId ?? null, title: input.title });
-
-      const media = await prisma.media.create({
-        data: {
-          projectId,
-          creatorId: userId,
-          folderId: input.folderId ?? null,
-          title,
-          seriesId: input.seriesId ?? null,
-          permissionGrants: {
-            create: ["manage", "annotate", "view"].map((permission) => ({ subjectType: "creator", subjectKey: "", permission: permission as any }))
-          }
-        },
-        select: {
-          id: true,
-          projectId: true,
-          folderId: true,
-          title: true,
-          status: true,
-          reviewStatus: true,
-          createdAt: true,
-          updatedAt: true
-        }
-      });
+      const title = input.sourceMediaId || input.seriesId
+        ? input.title.trim()
+        : await makeUniqueMediaTitle({ projectId, folderId: input.folderId ?? null, title: input.title });
+      const media = await createMediaVersion({ ...input, userId, projectId, title });
 
       await auditLog({
         req,
@@ -688,7 +672,7 @@ export async function mediaRoutes(app: FastifyInstance) {
         action: "media.create",
         entityType: "Media",
         entityId: media.id,
-        meta: { projectId, folderId: media.folderId }
+        meta: { projectId, folderId: media.folderId, seriesId: media.seriesId, versionIndex: media.versionIndex, sourceMediaId: input.sourceMediaId }
       });
 
       return reply.code(201).send({
@@ -701,6 +685,18 @@ export async function mediaRoutes(app: FastifyInstance) {
       });
     }
   );
+
+  app.get<{ Params: { mediaId: string } }>("/media/:mediaId/versions", { preHandler: requireUser }, async (req) => {
+    return getMediaVersionHistory(getUserId(req), req.params.mediaId);
+  });
+
+  app.delete<{ Params: { projectId: string; seriesId: string } }>("/projects/:projectId/media-series/:seriesId", { preHandler: requireUser }, async (req) => {
+    const { projectId, seriesId } = req.params;
+    const userId = getUserId(req);
+    const result = await deleteMediaSeries(userId, projectId, seriesId);
+    await auditLog({ req, actorUserId: userId, action: "media_series.delete", entityType: "MediaSeries", entityId: seriesId, meta: { projectId, count: result.count } });
+    return { ok: true, deleted: result.count };
+  });
 
   app.get("/media/:mediaId/permissions", { preHandler: requireUser }, async (req, reply) => {
     const userId = getUserId(req);
@@ -942,6 +938,9 @@ export async function mediaRoutes(app: FastifyInstance) {
     const mediaId = (req.params as any).mediaId as string;
     const access = await assertMediaAccessIncludingDeleted(userId, mediaId, "media:manage");
     if (!access || !access.deletedAt) return reply.code(404).send({ error: "not_found" });
+
+    const version = await prisma.media.findUnique({ where: { id: mediaId }, select: { series: { select: { deletedAt: true } } } });
+    if (version?.series?.deletedAt) return reply.code(409).send({ error: "series_deleted" });
 
     const media = await prisma.media.update({
       where: { id: mediaId },
@@ -1341,6 +1340,9 @@ export async function mediaRoutes(app: FastifyInstance) {
     if (!access) return reply.code(404).send({ error: "not_found" });
 
     const input = EnqueueSchema.parse(req.body);
+    if (!input.originalObjectKey.startsWith(`original/${mediaId}/`)) {
+      return reply.code(400).send({ error: "invalid_object_key" });
+    }
     const transcode = input.mode === "compress" ? input.transcode : undefined;
 
     const prepared = input.mode === "original"
@@ -1414,6 +1416,8 @@ export async function mediaRoutes(app: FastifyInstance) {
     const access = await assertProjectAccess(userId, projectId, "project:upload");
     if (!access) return reply.code(404).send({ error: "not_found" });
 
+    await authorizeMediaVersionTarget({ ...input, userId, projectId, title: input.title ?? "Import" });
+
     const folderOk = await assertFolderAccess(projectId, input.folderId ?? null);
     if (!folderOk) return reply.code(404).send({ error: "folder_not_found" });
 
@@ -1431,27 +1435,17 @@ export async function mediaRoutes(app: FastifyInstance) {
 
     let mediaId: string | undefined;
     try {
-      const title = await makeUniqueMediaTitle({
+      const importTitle = (input.title ?? stripFileExtension(path.basename(resolved.absolutePath))).trim().slice(0, 200) || "Untitled";
+      const title = input.sourceMediaId || input.seriesId ? importTitle : await makeUniqueMediaTitle({
         projectId,
         folderId: input.folderId ?? null,
-        title: input.title ?? stripFileExtension(path.basename(resolved.absolutePath))
+        title: importTitle
       });
       const transcode = input.mode === "compress" ? input.transcode : undefined;
       req.log.info({ importPath: resolved.relativePath, sizeBytes: stat.size }, "Starting server media import");
       const metadata = await readLocalMediaMetadata(resolved.absolutePath, stat.size);
 
-      const media = await prisma.media.create({
-        data: {
-          projectId,
-          creatorId: userId,
-          folderId: input.folderId ?? null,
-          title,
-          permissionGrants: {
-            create: ["manage", "annotate", "view"].map((permission) => ({ subjectType: "creator", subjectKey: "", permission: permission as any }))
-          }
-        },
-        select: { id: true, projectId: true, folderId: true, title: true, status: true, reviewStatus: true, createdAt: true, updatedAt: true }
-      });
+      const media = await createMediaVersion({ ...input, userId, projectId, title });
       mediaId = media.id;
 
       const ext = path.extname(resolved.absolutePath).replace(/^\./, "").slice(0, 10) || "bin";
@@ -1485,6 +1479,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       req.log.info({ mediaId: media.id, importPath: resolved.relativePath }, "Completed server media import");
       return reply.code(201).send({ media, upload: { objectKey, mode: input.mode }, queued: registered.queued, metadata: serializeMediaMetadata(metadata) });
     } catch (error) {
+      if (error instanceof MediaSeriesError) return reply.code(error.statusCode).send({ error: error.code });
       req.log.error({ err: error, importPath: resolved.relativePath, mediaId }, "Server media import failed");
       if (mediaId) {
         await prisma.media.update({ where: { id: mediaId }, data: { status: "failed" } }).catch(() => undefined);

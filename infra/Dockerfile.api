@@ -6,13 +6,16 @@ WORKDIR /app
 
 COPY package.json package-lock.json* ./
 COPY apps/api/package.json ./apps/api/package.json
+COPY apps/mcp/package.json ./apps/mcp/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
 
 RUN npm install
 
 COPY apps/api ./apps/api
+COPY apps/mcp ./apps/mcp
 COPY packages/shared ./packages/shared
 COPY infra ./infra
+COPY skills/markreel ./skills/markreel
 
 EXPOSE 4000
 

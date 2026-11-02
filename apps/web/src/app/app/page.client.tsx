@@ -1,16 +1,26 @@
 "use client";
 
 import type { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { IconRefresh } from "@tabler/icons-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { AppShell, UploadPanel } from "./_components/shell";
 import type { FolderNode, Project, SortMode, UploadItem, UploadStage, ViewMode, WorkspaceItem } from "./_components/shell";
 import { Dialog, NameDialog } from "./_components/dialog";
 import { formatBytes, formatDuration } from "./_components/workspaceMock";
-import { IconChevron, IconFolder, IconSearch, IconSort, IconVideo } from "./_components/icons";
+import { IconChevron, IconDelete, IconFolder, IconGrid, IconList, IconNewFolder, IconPlus, IconRename, IconSelect, IconSort, IconUp, IconUpload, IconVideo } from "./_components/icons";
 import { useUiPreferences } from "./_components/theme";
 import { api } from "./_components/api";
 import { placeAnchoredMenu } from "./_components/context-menu-position";
+import { useWorkspaceData, useWorkspaceEvent, useWorkspaceRequestGuard } from "./_components/use-workspace-data";
+import type { TrashItem } from "./_components/use-workspace-data";
+import { WorkspaceItems } from "./_components/workspace-items";
+import { selectWorkspaceItems } from "./_components/workspace-items-model";
+import { WorkspaceProjectList } from "./_components/workspace-project-list";
+import { WorkspaceSearch } from "./_components/workspace-search";
+import { MediaVersions } from "./_components/media-versions";
+import { DEFAULT_SERVER_IMPORT_SORT, nextServerImportSort, serverImportFileType, serverImportModifiedTime, serverImportSizeBytes, sortServerImportEntries } from "./_components/server-import-sort";
+import type { ServerImportEntry, ServerImportSort } from "./_components/server-import-sort";
 
 const VIDEO_FILE_EXTENSIONS = ["mp4", "mov", "m4v", "webm", "mkv", "avi", "mts", "m2ts", "ts", "wmv", "flv", "mpeg", "mpg", "3gp", "3g2"];
 const VIDEO_FILE_ACCEPT = ["video/*", ...VIDEO_FILE_EXTENSIONS.map((extension) => `.${extension}`)].join(",");
@@ -54,22 +64,6 @@ type ApiUser = {
   avatarPreset?: string | null;
   globalRole?: "admin" | "user";
 };
-type WorkspaceResponse = {
-  project: Project;
-  activeFolderId: string;
-  breadcrumbs: Array<{ id: string; name: string }>;
-  folderTree: FolderNode;
-  items: WorkspaceItem[];
-};
-
-type TrashItem = Extract<WorkspaceItem, { kind: "video" }> & {
-  deletedAt: number | null;
-};
-
-type TrashResponse = {
-  items: TrashItem[];
-};
-
 type PreviewState = {
   id: string;
   title: string;
@@ -103,13 +97,6 @@ type PreviewResponse = {
     url: string;
     fileName: string;
     inline: boolean;
-  };
-};
-
-type ThumbnailResponse = {
-  thumbnail: {
-    url: string;
-    mediaId: string;
   };
 };
 
@@ -283,6 +270,7 @@ type UploadResolution = "1080p" | "720p";
 type UploadFps = "source" | 24 | 25 | 30 | 60;
 
 type UploadDraft = {
+  sourceMediaId?: string;
   source: UploadSource;
   file: File | null;
   files: File[];
@@ -292,14 +280,6 @@ type UploadDraft = {
   targetResolution: UploadResolution;
   targetFps: UploadFps;
   folderId: string;
-};
-
-type ServerImportEntry = {
-  name: string;
-  path: string;
-  kind: "directory" | "file";
-  sizeBytes?: number;
-  updatedAt: number;
 };
 
 type ServerImportBrowseResponse = {
@@ -604,47 +584,6 @@ function toZhError(e: any): string {
   return map[code] ?? code;
 }
 
-function sortItems(items: WorkspaceItem[], sort: SortMode) {
-  const next = [...items];
-  if (sort === "name_asc") {
-    return next.sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
-  }
-  if (sort === "name_desc") {
-    return next.sort((a, b) => b.name.localeCompare(a.name, "zh-CN"));
-  }
-  return next.sort((a, b) => b.updatedAt - a.updatedAt);
-}
-
-function filterItems(items: WorkspaceItem[], query: string) {
-  const keyword = query.trim().toLowerCase();
-  if (!keyword) return items;
-  return items.filter((item) => item.name.toLowerCase().includes(keyword));
-}
-
-function formatResolution(item: Extract<WorkspaceItem, { kind: "video" }>) {
-  if (!item.width || !item.height) return "分辨率未知";
-  return `${item.width}×${item.height}`;
-}
-
-function formatFpsValue(frameCount?: number, durationSeconds?: number) {
-  if (!frameCount || !durationSeconds || durationSeconds <= 0) return null;
-  const fps = frameCount / durationSeconds;
-  if (!Number.isFinite(fps) || fps <= 0) return null;
-  const rounded = Math.round(fps * 100) / 100;
-  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2).replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1");
-}
-
-function formatFrames(item: Extract<WorkspaceItem, { kind: "video" }>) {
-  const fps = formatFpsValue(item.frameCount, item.durationSeconds);
-  if (!fps) return "FPS 未知";
-  return `${fps} FPS`;
-}
-
-function formatBitrate(item: Extract<WorkspaceItem, { kind: "video" }>) {
-  if (!item.bitrateKbps) return "码率未知";
-  return `${item.bitrateKbps} kbps`;
-}
-
 function formatUploadError(e: any) {
   if (e?.message === "upload_cancelled") return "上传已取消";
   let message = toZhError(e);
@@ -707,44 +646,6 @@ function formatSortLabel(sort: SortMode) {
   return label[sort];
 }
 
-function formatViewLabel(view: ViewMode) {
-  return view === "grid" ? "网格视图" : "列表视图";
-}
-
-function previewGradient(name: string) {
-  const palette = ["rgba(70,217,200,0.26)", "rgba(115,132,255,0.18)", "rgba(255,209,102,0.14)"];
-  const seed = Array.from(name).reduce((sum, char) => sum + char.charCodeAt(0), 0);
-  const a = palette[seed % palette.length];
-  const b = palette[(seed + 1) % palette.length];
-  return `linear-gradient(135deg, ${a}, ${b}), radial-gradient(circle at 20% 20%, rgba(255,255,255,0.2), transparent 42%)`;
-}
-
-type VideoCardPreviewProps = {
-  name: string;
-  previewUrl?: string | null;
-};
-
-function VideoCardPreview({ name, previewUrl }: VideoCardPreviewProps) {
-  if (!previewUrl) {
-    return (
-      <div
-        style={{
-          width: "100%",
-          height: "100%",
-          background: previewGradient(name),
-          display: "grid",
-          placeItems: "center",
-          color: "rgba(15,23,42,0.72)"
-        }}
-      >
-        <IconVideo size={26} />
-      </div>
-    );
-  }
-
-  return <img src={previewUrl} alt="" loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000" }} />;
-}
-
 function WorkbenchLoadingScreen() {
   return (
     <main className="mr-workbench-loading" aria-label="正在加载 MarkReel">
@@ -790,26 +691,33 @@ export default function AppClient() {
   const [displayName, setDisplayName] = useState("");
   const [user, setUser] = useState<ApiUser | null>(null);
   const [authChecking, setAuthChecking] = useState(true);
-  const [workspaces, setWorkspaces] = useState<Project[]>([]);
+  const authSequence = useRef(0);
+  const mounted = useRef(false);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      authSequence.current += 1;
+    };
+  }, []);
   const [err, setErr] = useState<string | null>(null);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
-  const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [uploadDraft, setUploadDraft] = useState<UploadDraft | null>(null);
   const [serverImportPath, setServerImportPath] = useState("");
   const [serverImportEntries, setServerImportEntries] = useState<ServerImportEntry[]>([]);
+  const [serverImportSort, setServerImportSort] = useState<ServerImportSort>(DEFAULT_SERVER_IMPORT_SORT);
+  const sortedServerImportEntries = useMemo(() => sortServerImportEntries(serverImportEntries, serverImportSort), [serverImportEntries, serverImportSort]);
   const [serverImportParentPath, setServerImportParentPath] = useState<string | null>(null);
   const [serverImportBusy, setServerImportBusy] = useState(false);
   const [serverImportError, setServerImportError] = useState<string | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>(() => readStoredUploadQueue());
   const uploadAborters = useRef(new Map<string, AbortController>());
-  const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({});
   const [previewBusy, setPreviewBusy] = useState(false);
   const [feedback, setFeedback] = useState<FeedbackState | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
-  const [trashItems, setTrashItems] = useState<TrashItem[]>([]);
   const [projectOrder, setProjectOrder] = useState<string[]>([]);
   const [dragProjectId, setDragProjectId] = useState<string | null>(null);
   const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
@@ -831,6 +739,7 @@ export default function AppClient() {
   const [shareAudience, setShareAudience] = useState<ShareAudience>("anyone");
   const [shareExpiry, setShareExpiry] = useState<ShareExpiry>("7d");
   const [sharePermissions, setSharePermissions] = useState<SharePermission[]>(["view"]);
+  const [versionTarget, setVersionTarget] = useState<{ scopeKey: string; mediaId: string; name: string } | null>(null);
 
   const canSubmit = useMemo(() => {
     if (mode === "login") {
@@ -856,6 +765,40 @@ export default function AppClient() {
   const selectionMode = (sp.get("select") ?? "0") === "1";
   const scope = sp.get("scope") === "trash" ? "trash" : "workspace";
   const sel = sp.get("sel") || "";
+  const {
+    workspaces, workspace, trashItems, trashLoaded, effectivePid, effectiveFid, rootFid,
+    projectsLoading, projectsError, workspaceLoading, workspaceError, trashLoading, trashError,
+    refreshWorkspaces, refreshWorkspace, refreshTrash, clear: clearWorkspaceData
+  } = useWorkspaceData(user?.id ?? null, pid ?? activeWorkspaceId, fid, scope);
+  const workspaceScopeKey = JSON.stringify([user?.id, effectivePid, effectiveFid]);
+  const beginPreviewRequest = useWorkspaceRequestGuard(`${workspaceScopeKey}:${scope}`);
+  const beginProjectMembersRequest = useWorkspaceRequestGuard(workspaceScopeKey);
+  const beginMediaPermissionsRequest = useWorkspaceRequestGuard(workspaceScopeKey);
+  const beginShareLinksRequest = useWorkspaceRequestGuard(workspaceScopeKey);
+  const beginServerBrowseRequest = useWorkspaceRequestGuard(`${workspaceScopeKey}:${uploadDraft ? "open" : "closed"}`);
+  useLayoutEffect(() => {
+    setDialog(null);
+    setUploadDraft(null);
+    setContextMenu(null);
+    setSortMenuOpen(false);
+    setPreviewBusy(false);
+    setCollaborationOpen(false);
+    setMembersLoading(false);
+    setProjectPermissionGrants([]);
+    setOrganizationMembers([]);
+    setMediaPermissionsTarget(null);
+    setMediaPermissionMeta(null);
+    setMediaPermissionGrants([]);
+    setMediaPermissionMembers([]);
+    setMediaPermissionsLoading(false);
+    setShareLinksTarget(null);
+    setShareLinks([]);
+    setShareLinksLoading(false);
+    setServerImportBusy(false);
+    setServerImportEntries([]);
+    setVersionTarget(null);
+    setFeedback(null);
+  }, [workspaceScopeKey]);
 
   const orderedWorkspaces = useMemo(() => {
     if (projectOrder.length === 0) return workspaces;
@@ -893,66 +836,33 @@ export default function AppClient() {
     router.replace(url);
   }
 
-  function getEffectiveWorkspaceId(): string | null {
-    if (pid) return pid;
-    if (activeWorkspaceId) return activeWorkspaceId;
-    if (workspaces[0]?.id) return workspaces[0].id;
-    return null;
-  }
-
-  const effectivePid = getEffectiveWorkspaceId();
-  const rootFid = effectivePid ? `root-${effectivePid}` : null;
-  const effectiveFid = fid ?? rootFid;
-
-  async function refreshWorkspace(projectId = effectivePid, folderId = effectiveFid) {
-    if (!projectId) {
-      setWorkspace(null);
-      return null;
-    }
-    const query = new URLSearchParams();
-    if (folderId) query.set("folderId", folderId);
-    const suffix = query.toString() ? `?${query.toString()}` : "";
-    const data = await api<WorkspaceResponse>(`/projects/${projectId}/workspace${suffix}`);
-    setWorkspace(data);
-    return data;
-  }
-
-  async function refreshTrash(projectId = effectivePid) {
-    if (!projectId) {
-      setTrashItems([]);
-      return [];
-    }
-    const data = await api<TrashResponse>(`/projects/${projectId}/trash`);
-    setTrashItems(data.items);
-    return data.items;
-  }
-
   async function refreshMe() {
+    // Login/logout advance this epoch before I/O; /me must not restore an old session.
+    const sequence = ++authSequence.current;
+    const isCurrent = () => mounted.current && sequence === authSequence.current;
     try {
       const r = await api<{ user: ApiUser }>("/me");
+      if (!isCurrent()) return;
       setUser(r.user);
       setErr(null);
     } catch {
-      resetAuthenticatedState();
+      if (isCurrent()) resetAuthenticatedState();
     } finally {
-      setAuthChecking(false);
+      if (isCurrent()) setAuthChecking(false);
     }
   }
 
   function resetAuthenticatedState() {
+    clearWorkspaceData();
     setUser(null);
-    setWorkspaces([]);
     setActiveWorkspaceId(null);
-    setWorkspace(null);
     setDialog(null);
     setUploadDraft(null);
     setUploadQueue(() => []);
-    setThumbnailUrls({});
     setPreviewBusy(false);
     setFeedback(null);
     setContextMenu(null);
     setSortMenuOpen(false);
-    setTrashItems([]);
     setProjectOrder([]);
     setDragProjectId(null);
     setDragOverProjectId(null);
@@ -974,6 +884,7 @@ export default function AppClient() {
     setShareAudience("anyone");
     setShareExpiry("7d");
     setSharePermissions(["view"]);
+    setVersionTarget(null);
     setBusy(false);
     setAuthChecking(false);
     if (typeof window !== "undefined") {
@@ -984,28 +895,9 @@ export default function AppClient() {
     }
   }
 
-  async function refreshWorkspaces() {
-    const r = await api<{ projects: Project[] }>("/projects");
-    setWorkspaces(r.projects);
-    setActiveWorkspaceId((prev) => prev ?? (r.projects[0]?.id ?? null));
-
-    if (!pid && r.projects[0]?.id) {
-      setQuery({ pid: r.projects[0].id, fid: `root-${r.projects[0].id}` });
-    }
-  }
-
   useEffect(() => {
     void refreshMe();
   }, []);
-
-  useEffect(() => {
-    if (!user) return;
-    void refreshWorkspaces().catch((e) => {
-      const message = toZhError(e);
-      setErr(message);
-      showFeedback("error", message);
-    });
-  }, [user?.id]);
 
   useEffect(() => {
     if (!user) return;
@@ -1023,30 +915,21 @@ export default function AppClient() {
   }, [user?.id]);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || projectsLoading) return;
     const nextIds = workspaces.map((project) => project.id);
+    const nextSet = new Set(nextIds);
     setProjectOrder((prev) => {
-      const kept = prev.filter((id) => nextIds.includes(id));
-      const missing = nextIds.filter((id) => !kept.includes(id));
-      return [...kept, ...missing];
+      const kept = prev.filter((id) => nextSet.has(id));
+      const keptSet = new Set(kept);
+      const next = [...kept, ...nextIds.filter((id) => !keptSet.has(id))];
+      return prev.length === next.length && prev.every((id, index) => next[index] === id) ? prev : next;
     });
-  }, [workspaces, user?.id]);
+  }, [workspaces, user?.id, projectsLoading]);
 
   useEffect(() => {
     if (!user) return;
     window.localStorage.setItem(`mr_project_order_${user.id}`, JSON.stringify(projectOrder));
   }, [projectOrder, user?.id]);
-
-  useEffect(() => {
-    if (!user || !effectivePid) return;
-    void refreshWorkspace(effectivePid, effectiveFid).catch((e) => {
-      const message = toZhError(e);
-      setErr(message);
-      setWorkspace(null);
-      showFeedback("error", message);
-    });
-    void refreshTrash(effectivePid).catch(() => setTrashItems([]));
-  }, [user?.id, effectivePid, effectiveFid]);
 
   useEffect(() => {
     if (!contextMenu && !sortMenuOpen) return;
@@ -1073,20 +956,23 @@ export default function AppClient() {
   }
 
   async function loadProjectMembers(projectId: string) {
+    const isCurrent = beginProjectMembersRequest();
     setMembersLoading(true);
     try {
       const result = await api<ProjectPermissionsResponse>(`/projects/${projectId}/permissions`);
+      if (!isCurrent()) return;
       setProjectPermissionGrants(result.grants);
       if (result.project.organizationId) {
         const members = await api<OrganizationMembersResponse>(`/organizations/${result.project.organizationId}/members`);
+        if (!isCurrent()) return;
         setOrganizationMembers(members.members);
       } else {
         setOrganizationMembers([]);
       }
     } catch (e: any) {
-      showFeedback("error", toZhError(e));
+      if (isCurrent()) showFeedback("error", toZhError(e));
     } finally {
-      setMembersLoading(false);
+      if (isCurrent()) setMembersLoading(false);
     }
   }
 
@@ -1135,21 +1021,24 @@ export default function AppClient() {
   }
 
   async function loadMediaPermissions(item: Extract<WorkspaceItem, { kind: "video" }>) {
+    const isCurrent = beginMediaPermissionsRequest();
     setMediaPermissionsLoading(true);
     try {
       const result = await api<MediaPermissionsResponse>(`/media/${item.id}/permissions`);
+      if (!isCurrent()) return;
       setMediaPermissionMeta(result.media);
       setMediaPermissionGrants(result.grants);
       if (result.media.organizationId) {
         const members = await api<OrganizationMembersResponse>(`/organizations/${result.media.organizationId}/members`);
+        if (!isCurrent()) return;
         setMediaPermissionMembers(members.members);
       } else {
         setMediaPermissionMembers([]);
       }
     } catch (e: any) {
-      showFeedback("error", toZhError(e));
+      if (isCurrent()) showFeedback("error", toZhError(e));
     } finally {
-      setMediaPermissionsLoading(false);
+      if (isCurrent()) setMediaPermissionsLoading(false);
     }
   }
 
@@ -1196,14 +1085,16 @@ export default function AppClient() {
   }
 
   async function loadMediaShareLinks(mediaId: string) {
+    const isCurrent = beginShareLinksRequest();
     setShareLinksLoading(true);
     try {
       const result = await api<ShareLinksResponse>(`/media/${mediaId}/share-links`);
+      if (!isCurrent()) return;
       setShareLinks(result.shareLinks);
     } catch (e: any) {
-      showFeedback("error", toZhError(e));
+      if (isCurrent()) showFeedback("error", toZhError(e));
     } finally {
-      setShareLinksLoading(false);
+      if (isCurrent()) setShareLinksLoading(false);
     }
   }
 
@@ -1367,7 +1258,7 @@ export default function AppClient() {
     if (target === "workspace" || target === "project_area") return 60;
     if (target.kind === "project" || target.kind === "folder_tree") return 152;
     if (scope === "trash") return 108;
-    if (target.kind === "video") return 300;
+    if (target.kind === "video") return 384;
     return 152;
   }
 
@@ -1448,34 +1339,6 @@ export default function AppClient() {
 
   function wait(ms: number) {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
-  }
-
-  async function cacheThumbnailUrl(mediaId: string) {
-    if (thumbnailUrls[mediaId]) return thumbnailUrls[mediaId];
-    const data = await api<ThumbnailResponse>(`/media/${mediaId}/thumbnail`);
-    setThumbnailUrls((prev) => ({ ...prev, [mediaId]: data.thumbnail.url }));
-    return data.thumbnail.url;
-  }
-
-  async function warmThumbnailUrls(itemsToWarm: WorkspaceItem[]) {
-    const targets = itemsToWarm.filter((item): item is Extract<WorkspaceItem, { kind: "video" }> => item.kind === "video");
-    if (targets.length === 0) return;
-
-    const nextEntries = await Promise.all(
-      targets.map(async (item) => {
-        if (item.thumbnailUrl || thumbnailUrls[item.id]) return null;
-        try {
-          const url = await cacheThumbnailUrl(item.id);
-          return [item.id, url] as const;
-        } catch {
-          return null;
-        }
-      })
-    );
-
-    const readyEntries = nextEntries.filter((entry): entry is readonly [string, string] => !!entry);
-    if (readyEntries.length === 0) return;
-    setThumbnailUrls((prev) => ({ ...prev, ...Object.fromEntries(readyEntries) }));
   }
 
   async function markUploadReady(id: string, mediaId: string) {
@@ -1570,6 +1433,8 @@ export default function AppClient() {
       setErr("密码至少需要 8 位");
       return;
     }
+    const sequence = ++authSequence.current;
+    const isCurrent = () => mounted.current && sequence === authSequence.current;
     try {
       if (mode === "register") {
         await api("/auth/register", {
@@ -1579,18 +1444,25 @@ export default function AppClient() {
       } else {
         await api("/auth/login", { method: "POST", body: JSON.stringify({ username: trimmedUsername, password }) });
       }
-      await refreshMe();
+      if (isCurrent()) await refreshMe();
     } catch (e: any) {
-      setErr(toZhError(e));
+      if (isCurrent()) setErr(toZhError(e));
     }
   }
 
   async function onLogout() {
+    const sequence = ++authSequence.current;
+    clearWorkspaceData();
+    uploadAborters.current.forEach((controller) => controller.abort());
+    resetAuthenticatedState();
+    setAuthChecking(true);
     setErr(null);
     try {
       await api("/auth/logout", { method: "POST", body: "{}" });
+    } catch (error) {
+      if (mounted.current && sequence === authSequence.current) setErr(toZhError(error));
     } finally {
-      resetAuthenticatedState();
+      if (mounted.current && sequence === authSequence.current) setAuthChecking(false);
     }
   }
 
@@ -1639,15 +1511,13 @@ export default function AppClient() {
     setBusy(true);
     try {
       await api(`/projects/${projectId}`, { method: "DELETE" });
-      const refreshed = await api<{ projects: Project[] }>("/projects");
-      setWorkspaces(refreshed.projects);
+      const refreshed = await refreshWorkspaces();
+      if (!refreshed) return;
       const nextProjectId = refreshed.projects[0]?.id ?? null;
       setActiveWorkspaceId(nextProjectId);
       setContextMenu(null);
       setDialog(null);
       if (!nextProjectId) {
-        setWorkspace(null);
-        setTrashItems([]);
         setQuery({ pid: null, fid: null, scope: null, q: null, sel: null });
       } else if (projectId === effectivePid) {
         setQuery({ pid: nextProjectId, fid: `root-${nextProjectId}`, scope: null, q: null, sel: null });
@@ -1726,21 +1596,24 @@ export default function AppClient() {
     setDialog({ type: "create_folder", value: "新建文件夹" });
   }
 
-  function openUploadDialog() {
+  function openUploadDialog(sourceMediaId?: string) {
     if (!effectivePid || !rootFid) return;
+    const source = sourceMediaId ? workspace?.items.find((item) => item.id === sourceMediaId) : null;
     setUploadDraft({
+      sourceMediaId,
       source: "local",
       file: null,
       files: [],
       serverPath: "",
-      title: "",
-      mode: "compress",
+      title: source?.name ?? (sourceMediaId && versionTarget?.scopeKey === workspaceScopeKey ? versionTarget.name : ""),
+      mode: "original",
       targetResolution: "1080p",
       targetFps: 30,
       folderId: effectiveFid ?? rootFid
     });
     setServerImportPath("");
     setServerImportEntries([]);
+    setServerImportSort(DEFAULT_SERVER_IMPORT_SORT);
     setServerImportParentPath(null);
     setServerImportError(null);
   }
@@ -1788,21 +1661,24 @@ export default function AppClient() {
       return;
     }
 
+    const isCurrent = beginPreviewRequest();
     setErr(null);
     setPreviewBusy(true);
     try {
       await api<PreviewResponse>(`/media/${item.id}/preview`);
+      if (!isCurrent()) return;
       setUploadQueue((prev) => prev.map((upload) => (upload.mediaId === item.id ? { ...upload, stage: "ready", progress: 100, error: undefined, actionLabel: "可预览" } : upload)));
       localStorage.setItem("mr_last_workbench_url", `${pathname}?${sp.toString()}` || pathname);
       router.push(`/app/player?mid=${encodeURIComponent(item.id)}`);
       showFeedback("success", `已打开 ${item.name}`);
     } catch (e: any) {
+      if (!isCurrent()) return;
       const code = e?.data?.error;
       const message = code === "preview_not_ready" ? "该视频还在处理中，暂时还不能预览。" : toZhError(e);
       setErr(message);
       showFeedback(code === "preview_not_ready" ? "info" : "error", message);
     } finally {
-      setPreviewBusy(false);
+      if (isCurrent()) setPreviewBusy(false);
     }
   }
 
@@ -1814,29 +1690,32 @@ export default function AppClient() {
     await openItem(item);
   }
 
-  async function openUploadItem(mediaId: string) {
+  async function openUploadItem(mediaId: string, ignoreSelection = false) {
     const target = workspace?.items.find((item) => item.id === mediaId) ?? null;
-    if (target && target.kind === "video") {
+    if (target && target.kind === "video" && !ignoreSelection) {
       await openItem(target);
       return;
     }
 
+    const isCurrent = beginPreviewRequest();
     setErr(null);
     setPreviewBusy(true);
     try {
       await api<PreviewResponse>(`/media/${mediaId}/preview`);
+      if (!isCurrent()) return;
       const title = uploads.find((upload) => upload.mediaId === mediaId)?.fileName ?? "预览";
       setUploadQueue((prev) => prev.map((upload) => (upload.mediaId === mediaId ? { ...upload, stage: "ready", progress: 100, error: undefined, actionLabel: "可预览" } : upload)));
       localStorage.setItem("mr_last_workbench_url", `${pathname}?${sp.toString()}` || pathname);
       router.push(`/app/player?mid=${encodeURIComponent(mediaId)}`);
       showFeedback("success", `已打开 ${title}`);
     } catch (e: any) {
+      if (!isCurrent()) return;
       const code = e?.data?.error;
       const message = code === "preview_not_ready" ? "该视频还在处理中，暂时还不能预览。" : toZhError(e);
       setErr(message);
       showFeedback(code === "preview_not_ready" ? "info" : "error", message);
     } finally {
-      setPreviewBusy(false);
+      if (isCurrent()) setPreviewBusy(false);
     }
   }
 
@@ -1988,7 +1867,7 @@ export default function AppClient() {
     }
   }
 
-  function handleContextMenuAction(action: "create_folder" | "rename" | "delete" | "open" | "download" | "restore" | "create_project" | "video_permissions" | "video_share_links") {
+  function handleContextMenuAction(action: "create_folder" | "rename" | "delete" | "open" | "download" | "restore" | "create_project" | "video_permissions" | "video_share_links" | "upload_version" | "versions") {
     const target = contextMenu?.target ?? null;
     setContextMenu(null);
 
@@ -2063,6 +1942,13 @@ export default function AppClient() {
       return;
     }
 
+    if ((action === "versions" || action === "upload_version") && target.kind === "video" && scope === "workspace") {
+      setVersionTarget({ scopeKey: workspaceScopeKey, mediaId: target.id, name: target.name });
+      if (action === "upload_version") openUploadDialog(target.id);
+      else setQuery({ panel: "1" });
+      return;
+    }
+
     if (action === "restore" && scope === "trash" && target.kind === "video") {
       void onRestoreItem(target as TrashItem);
       return;
@@ -2090,6 +1976,7 @@ export default function AppClient() {
         method: "POST",
         body: JSON.stringify({
           title,
+          sourceMediaId: draft.sourceMediaId,
           folderId: draft.folderId === rootFid ? null : draft.folderId
         })
       });
@@ -2217,6 +2104,10 @@ export default function AppClient() {
     if (!effectivePid || !rootFid) return;
     const selectedFiles = draft.files.length > 0 ? draft.files : draft.file ? [draft.file] : [];
     const files = selectedFiles.filter(isSupportedVideoFile);
+    if (draft.sourceMediaId && files.length > 1) {
+      showFeedback("error", "每次只能为素材上传一个新版本");
+      return;
+    }
     if (files.length === 0) {
       showFeedback("error", "暂不支持所选文件格式，请选择 MP4、MOV、MKV、AVI、WEBM 等视频文件");
       return;
@@ -2264,19 +2155,22 @@ export default function AppClient() {
   }
 
   async function browseServerImport(path = "") {
+    const isCurrent = beginServerBrowseRequest();
     setServerImportBusy(true);
     setServerImportError(null);
     try {
       const data = await api<ServerImportBrowseResponse>(`/server-import/browse?path=${encodeURIComponent(path)}`);
+      if (!isCurrent()) return;
       setServerImportPath(data.path);
       setServerImportParentPath(data.parentPath);
       setServerImportEntries(data.entries);
     } catch (e: any) {
+      if (!isCurrent()) return;
       setServerImportEntries([]);
       setServerImportParentPath(null);
       setServerImportError(toZhError(e));
     } finally {
-      setServerImportBusy(false);
+      if (isCurrent()) setServerImportBusy(false);
     }
   }
 
@@ -2317,6 +2211,7 @@ export default function AppClient() {
         body: JSON.stringify({
           path: draft.serverPath,
           title: draft.title,
+          sourceMediaId: draft.sourceMediaId,
           folderId: draft.folderId === rootFid ? null : draft.folderId,
           mode: draft.mode,
           transcode:
@@ -2346,27 +2241,19 @@ export default function AppClient() {
     }
   }
 
-  function isUploadHiddenFromWorkspace(item: WorkspaceItem) {
-    if (item.kind !== "video") return false;
-    return uploads.some((upload) => upload.mediaId === item.id && upload.stage !== "ready" && upload.stage !== "error" && upload.stage !== "cancelled");
-  }
-
   useEffect(() => {
     if (!uploadDraft || uploadDraft.source !== "server" || serverImportEntries.length > 0 || serverImportBusy || serverImportError) return;
     void browseServerImport("");
   }, [uploadDraft?.source, serverImportEntries.length, serverImportBusy, serverImportError]);
 
 
-  const items: WorkspaceItem[] = useMemo(() => sortItems(filterItems(workspace?.items ?? [], q), sort), [workspace, q, sort]);
-  const filteredTrashItems = useMemo(() => sortItems(filterItems(trashItems, q), sort), [trashItems, q, sort]);
-  const visibleItems = useMemo(() => scope === "trash" ? filteredTrashItems : items.filter((item) => !isUploadHiddenFromWorkspace(item)), [filteredTrashItems, items, scope, uploads]);
+  const items = useMemo(() => selectWorkspaceItems(workspace?.items ?? [], q, sort), [workspace, q, sort]);
+  const filteredTrashItems = useMemo(() => selectWorkspaceItems(trashItems, q, sort), [trashItems, q, sort]);
+  const hiddenUploadKey = JSON.stringify(uploads.filter((upload) => upload.mediaId && upload.stage !== "ready" && upload.stage !== "error" && upload.stage !== "cancelled").map((upload) => upload.mediaId).sort());
+  const hiddenUploadIds = useMemo(() => new Set<string>(JSON.parse(hiddenUploadKey)), [hiddenUploadKey]);
+  const visibleItems = useMemo(() => scope === "trash" ? filteredTrashItems : items.filter((item) => item.kind !== "video" || !hiddenUploadIds.has(item.id)), [filteredTrashItems, items, scope, hiddenUploadIds]);
   const crumbs = workspace?.breadcrumbs ?? [];
   const folderOptions = useMemo(() => buildFolderOptions(rootFid, workspace?.folderTree ?? null), [rootFid, workspace?.folderTree]);
-
-  useEffect(() => {
-    const visibleVideos = items.slice(0, view === "grid" ? 8 : 4);
-    void warmThumbnailUrls(visibleVideos);
-  }, [items, view]);
 
   const folderTree = workspace?.folderTree ?? null;
   const currentFolderName = crumbs.at(-1)?.name ?? "根目录";
@@ -2402,7 +2289,24 @@ export default function AppClient() {
   const currentProjectRoleLabel = user?.globalRole === "admin" && currentProject?.ownerId !== user.id
     ? "管理员"
     : roleLabel(currentProject?.role);
-  const projectViewSizeBytes = visibleItems.reduce((sum, item) => sum + (item.kind === "video" ? item.sizeBytes ?? 0 : 0), 0);
+  const projectViewSizeBytes = useMemo(() => visibleItems.reduce((sum, item) => sum + (item.kind === "video" ? item.sizeBytes ?? 0 : 0), 0), [visibleItems]);
+  const onWorkspaceItemOpen = useWorkspaceEvent((item: WorkspaceItem) => { void handleItemClick(item); });
+  const onWorkspaceItemSelect = useWorkspaceEvent(toggleSelected);
+  const onWorkspaceItemContext = useWorkspaceEvent((event: ReactMouseEvent, item: WorkspaceItem) => openContextMenu(event, item));
+  const onWorkspaceItemMenu = useWorkspaceEvent((event: ReactMouseEvent<HTMLButtonElement>, item: WorkspaceItem) => openAnchoredContextMenu(event, item));
+  const onWorkspaceSearch = useWorkspaceEvent((value: string) => setQuery({ q: value }));
+  const onWorkspaceProjectOpen = useWorkspaceEvent((id: string) => setQuery({ pid: id, fid: `root-${id}`, scope: null, q: null, sel: null }));
+  const onWorkspaceProjectMenu = useWorkspaceEvent((event: ReactMouseEvent<HTMLButtonElement>, project: Project) => openAnchoredContextMenu(event, { kind: "project", id: project.id, name: project.name, ownerId: project.ownerId }));
+  const onWorkspaceProjectDragStart = useWorkspaceEvent(onProjectDragStart);
+  const onWorkspaceProjectDragOver = useWorkspaceEvent(onProjectDragOver);
+  const onWorkspaceProjectDrop = useWorkspaceEvent(onProjectDrop);
+  const onWorkspaceProjectDragEnd = useWorkspaceEvent(onProjectDragEnd);
+  const activeDataLoading = scope === "trash" ? trashLoading : workspaceLoading;
+  const activeDataError = scope === "trash" ? trashError : workspaceError;
+  const selectedVersionItem = selectedIds.size === 1 ? workspace?.items.find((item) => selectedIds.has(item.id) && item.kind === "video") : null;
+  const activeVersionTarget = scope === "workspace" ? (versionTarget?.scopeKey === workspaceScopeKey ? versionTarget : selectedVersionItem ? { mediaId: selectedVersionItem.id, name: selectedVersionItem.name } : null) : null;
+  const workspaceVersionKey = useMemo(() => workspace?.items.map((item) => item.kind === "video" ? `${item.id}:${item.versionCount ?? 1}` : "").join(",") ?? "", [workspace]);
+  const versionRefreshKey = `${workspaceVersionKey}:${uploads.map((upload) => `${upload.mediaId ?? ""}:${upload.stage === "ready" ? "ready" : "pending"}`).join(",")}`;
 
   return (
     <main style={{ minHeight: "100vh" }}>
@@ -2945,8 +2849,8 @@ export default function AppClient() {
 
       <Dialog
         open={!!uploadDraft}
-        title="上传视频"
-        description="选择本地文件或服务器挂载路径，再确认处理参数和目标目录。"
+        title={uploadDraft?.sourceMediaId ? "上传新版本" : "上传视频"}
+        size={uploadDraft?.source === "server" ? "wide" : "default"}
         onClose={() => setUploadDraft(null)}
         footer={
           <>
@@ -2995,9 +2899,9 @@ export default function AppClient() {
           {uploadDraft?.source === "server" ? (
             <div className="mr-field">
               <span className="mr-field__label">服务器路径</span>
-              <div className="mr-panel" style={{ padding: 10, boxShadow: "none", background: "var(--panel3)", display: "grid", gap: 8 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
-                  <span className="mr-badge">/{serverImportPath}</span>
+              <div className="mr-panel mr-server-import">
+                <div className="mr-server-import__pathbar">
+                  <code className="mr-server-import__path" aria-label="当前服务器路径">/{serverImportPath}</code>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button className="mr-btn" type="button" disabled={serverImportParentPath === null || serverImportBusy} onClick={() => void browseServerImport(serverImportParentPath ?? "")}>
                       上一级
@@ -3008,35 +2912,72 @@ export default function AppClient() {
                   </div>
                 </div>
                 {serverImportError ? <div className="mr-dialog__note">{serverImportError}</div> : null}
-                <div style={{ display: "grid", gap: 6, maxHeight: 220, overflow: "auto" }}>
-                  {serverImportBusy ? (
-                    <div style={{ color: "var(--muted)", padding: 8 }}>正在读取目录…</div>
-                  ) : serverImportEntries.length === 0 ? (
-                    <div style={{ color: "var(--muted)", padding: 8 }}>没有可显示的文件。</div>
-                  ) : (
-                    serverImportEntries.map((entry) => {
-                      const selected = uploadDraft.serverPath === entry.path;
-                      return (
-                        <button
-                          key={entry.path}
-                          type="button"
-                          className={`mr-btn${selected ? " mr-btn--primary" : ""}`}
-                          style={{ justifyContent: "space-between", textAlign: "left" }}
-                          onClick={() => entry.kind === "directory" ? void browseServerImport(entry.path) : selectServerImportFile(entry)}
-                        >
-                          <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                            {entry.kind === "directory" ? <IconFolder size={16} /> : <IconVideo size={16} />}
-                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.name}</span>
-                          </span>
-                          {entry.kind === "file" ? <span style={{ color: selected ? "inherit" : "var(--muted)", fontSize: 12 }}>{formatBytes(entry.sizeBytes)}</span> : null}
-                        </button>
-                      );
-                    })
-                  )}
+                <div className="mr-server-import__files" role="region" aria-label="服务器文件列表" aria-busy={serverImportBusy} tabIndex={0}>
+                  <table aria-label="服务器文件" style={{ width: "100%", minWidth: 640, tableLayout: "fixed", borderCollapse: "separate", borderSpacing: "0 2px", fontSize: 13, textAlign: "left" }}>
+                    <thead>
+                      <tr>
+                        {([
+                          ["name", "名称", "48%"],
+                          ["type", "类型", "14%"],
+                          ["size", "大小", "14%"],
+                          ["updatedAt", "修改时间", "24%"]
+                        ] as const).map(([key, label, width]) => {
+                          const active = serverImportSort.key === key;
+                          const nextDirection = nextServerImportSort(serverImportSort, key).direction;
+                          return (
+                            <th key={key} scope="col" aria-sort={active ? (serverImportSort.direction === "asc" ? "ascending" : "descending") : undefined} style={{ width, padding: 0, position: "sticky", top: 0, zIndex: 1, background: "var(--surface-1)" }}>
+                              <button
+                                className="mr-btn mr-btn--ghost"
+                                type="button"
+                                aria-label={`按${label}${nextDirection === "asc" ? "升序" : "降序"}排序`}
+                                title={`按${label}${nextDirection === "asc" ? "升序" : "降序"}排序`}
+                                style={{ width: "100%", justifyContent: "flex-start", padding: "6px", gap: 4, borderColor: "transparent", borderRadius: 4 }}
+                                onClick={() => setServerImportSort((current) => nextServerImportSort(current, key))}
+                              >
+                                {label}
+                                {active ? <IconUp size={14} style={{ transform: serverImportSort.direction === "desc" ? "rotate(180deg)" : undefined }} /> : <IconSort size={14} style={{ color: "var(--muted)" }} />}
+                              </button>
+                            </th>
+                          );
+                        })}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {serverImportBusy || sortedServerImportEntries.length === 0 ? (
+                        <tr><td colSpan={4} style={{ color: "var(--muted)", padding: 8 }}><span role="status">{serverImportBusy ? "正在读取目录…" : "没有可显示的文件。"}</span></td></tr>
+                      ) : sortedServerImportEntries.map((entry) => {
+                        const selected = uploadDraft.serverPath === entry.path;
+                        const fileType = serverImportFileType(entry);
+                        const sizeBytes = serverImportSizeBytes(entry);
+                        const modifiedAt = new Date(serverImportModifiedTime(entry) ?? NaN);
+                        const modifiedLabel = Number.isNaN(modifiedAt.getTime()) ? "未知" : modifiedAt.toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+                        const openEntry = () => entry.kind === "directory" ? void browseServerImport(entry.path) : selectServerImportFile(entry);
+                        return (
+                          <tr key={entry.path} style={{ background: selected ? "var(--accent-soft)" : undefined, cursor: "pointer" }} onClick={openEntry}>
+                            <td style={{ padding: 0 }}>
+                              <button
+                                type="button"
+                                className="mr-btn mr-btn--ghost"
+                                aria-label={`${entry.kind === "directory" ? "打开文件夹" : "选择文件"} ${entry.name}`}
+                                aria-pressed={entry.kind === "file" ? selected : undefined}
+                                title={entry.name}
+                                style={{ width: "100%", minWidth: 0, justifyContent: "flex-start", padding: "6px", textAlign: "left", borderColor: "transparent", borderRadius: 4 }}
+                                onClick={(event) => { event.stopPropagation(); openEntry(); }}
+                              >
+                                {entry.kind === "directory" ? <IconFolder size={16} /> : <IconVideo size={16} />}
+                                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.name}</span>
+                              </button>
+                            </td>
+                            <td style={{ padding: "0 6px", overflowWrap: "anywhere", color: "var(--muted)" }}>{entry.kind === "directory" ? "文件夹" : fileType ? `${fileType.toUpperCase()} 文件` : "文件"}</td>
+                            <td style={{ padding: "0 6px", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums", color: "var(--muted)" }}>{entry.kind === "file" ? sizeBytes === undefined ? "未知" : sizeBytes === 0 ? "0 B" : formatBytes(sizeBytes) : ""}</td>
+                            <td style={{ padding: "0 6px", fontVariantNumeric: "tabular-nums", color: "var(--muted)" }}>{modifiedLabel}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
-                <span className="mr-upload-dialog__hint">
-                  {uploadDraft.serverPath ? `已选择：/${uploadDraft.serverPath}` : "请选择一个服务器挂载目录内的视频文件"}
-                </span>
+                {uploadDraft.serverPath ? <span className="mr-upload-dialog__hint" style={{ overflowWrap: "anywhere" }}>已选择：/{uploadDraft.serverPath}</span> : null}
               </div>
             </div>
           ) : (
@@ -3046,7 +2987,7 @@ export default function AppClient() {
                 className="mr-input mr-upload-dialog__file-input"
                 type="file"
                 accept={VIDEO_FILE_ACCEPT}
-                multiple
+                multiple={!uploadDraft?.sourceMediaId}
                 onChange={(e) => {
                   const selectedFiles = Array.from(e.target.files ?? []);
                   const files = selectedFiles.filter(isSupportedVideoFile);
@@ -3066,9 +3007,11 @@ export default function AppClient() {
                   e.currentTarget.value = "";
                 }}
               />
-              <span className="mr-upload-dialog__hint">
-                {uploadDraft?.files.length ? `已选择 ${uploadDraft.files.length} 个文件` : uploadDraft?.file ? `已选择：${uploadDraft.file.name}` : "暂未选择文件"}
-              </span>
+              {uploadDraft?.files.length || uploadDraft?.file ? (
+                <span className="mr-upload-dialog__hint">
+                  {uploadDraft.files.length ? uploadDraft.files.length === 1 ? `已选择：${uploadDraft.files[0].name}` : `已选择 ${uploadDraft.files.length} 个文件` : `已选择：${uploadDraft.file?.name}`}
+                </span>
+              ) : null}
             </label>
           )}
 
@@ -3087,10 +3030,10 @@ export default function AppClient() {
             <div className="mr-field">
               <span className="mr-field__label">上传模式</span>
               <UploadMenu
-                value={uploadDraft?.mode ?? "compress"}
+                value={uploadDraft?.mode ?? "original"}
                 options={[
-                  { value: "compress", label: "压缩上传" },
-                  { value: "original", label: "原始上传" }
+                  { value: "original", label: "原始上传" },
+                  { value: "compress", label: "压缩上传" }
                 ]}
                 onChange={(value) => setUploadDraft((prev) => (prev ? { ...prev, mode: value as UploadMode } : prev))}
               />
@@ -3100,6 +3043,7 @@ export default function AppClient() {
               <span className="mr-field__label">上传目标路径</span>
               <UploadMenu
                 value={uploadDraft?.folderId ?? rootFid ?? ""}
+                disabled={!!uploadDraft?.sourceMediaId}
                 options={folderOptions.map((option) => ({ value: option.id, label: option.label }))}
                 onChange={(value) => setUploadDraft((prev) => (prev ? { ...prev, folderId: value } : prev))}
               />
@@ -3145,11 +3089,6 @@ export default function AppClient() {
             </div>
           </div>
 
-          {uploadDraft?.mode === "original" ? (
-            <div className="mr-dialog__note">
-              原始上传会保留原始文件，分辨率与帧率选项不会生效。
-            </div>
-          ) : null}
         </div>
       </Dialog>
 
@@ -3203,6 +3142,7 @@ export default function AppClient() {
         </div>
       ) : (
         <AppShell
+          workspaceScroll
           user={user}
           inspectorOpen={inspectorPaneOpen}
           onClearUploads={() => clearUploadHistory()}
@@ -3221,150 +3161,55 @@ export default function AppClient() {
             <>
               <div className="mr-side-section">
                 <div className="mr-project-sidebar-head">
-                  <div>
-                    <div style={{ fontSize: 12, opacity: 0.7, textTransform: "uppercase", letterSpacing: 1.1 }}>Projects</div>
-                    <div style={{ fontWeight: 900, marginTop: 4 }}>项目列表</div>
-                  </div>
-                  <button className="mr-btn mr-btn--primary" type="button" onClick={() => openCreateWorkspaceDialog()}>
-                    新建项目
+                  <h2 className="mr-workspace-section-title">项目列表</h2>
+                  <button className="mr-btn mr-btn--icon mr-tooltip mr-tooltip--below-end" type="button" aria-label="新建项目" title="新建项目" data-tooltip="新建项目" onClick={() => openCreateWorkspaceDialog()}>
+                    <IconPlus />
                   </button>
                 </div>
               </div>
 
               <div className="mr-project-list-scroll" onContextMenu={(event) => openContextMenu(event, "project_area")}>
-                <div className="mr-side-section">
-                  <div className="mr-side-section__title">我的项目</div>
-                  <div style={{ display: "grid", gap: 8 }}>
-                  {myProjects.length === 0 ? (
-                    <div className="mr-panel" style={{ padding: 12, boxShadow: "none", color: "var(--muted)", lineHeight: 1.6 }}>
-                      还没有项目，先创建一个开始整理视频素材。
-                    </div>
-                  ) : (
-                    myProjects.map((project) => {
-                      const active = project.id === effectivePid && scope !== "trash";
-                      const groupIds = myProjects.map((item) => item.id);
-                      const dragging = dragProjectId === project.id;
-                      const dragOver = dragOverProjectId === project.id && dragProjectId !== project.id;
-                      return (
-                        <div
-                          key={project.id}
-                          className={`mr-project-row${active ? " mr-project-row--active" : ""}${dragging ? " mr-project-row--dragging" : ""}${dragOver ? " mr-project-row--drag-over" : ""}`}
-                          draggable
-                          onDragStart={(event) => onProjectDragStart(project.id, event)}
-                          onDragOver={(event) => onProjectDragOver(project.id, event)}
-                          onDrop={(event) => onProjectDrop(project.id, groupIds, event)}
-                          onDragEnd={onProjectDragEnd}
-                        >
-                          <div className="mr-project-row__grip" onClick={(event) => event.stopPropagation()} title="拖动排序" aria-hidden="true">
-                            ⋮⋮
-                          </div>
-                          <button
-                            type="button"
-                            className="mr-project-row__main"
-                            onClick={() => setQuery({ pid: project.id, fid: `root-${project.id}`, scope: null, q: null, sel: null })}
-                            title={project.name}
-                          >
-                            <span className="mr-project-row__name">{project.name}</span>
-                          </button>
-                          <button
-                            type="button"
-                            className="mr-project-row__menu"
-                            aria-label={`项目菜单：${project.name}`}
-                            onClick={(event) => openAnchoredContextMenu(event, { kind: "project", id: project.id, name: project.name, ownerId: project.ownerId })}
-                          >
-                            •••
-                          </button>
-                        </div>
-                      );
-                    })
-                  )}
-                  </div>
-                </div>
-
-                <div className="mr-side-section">
-                  <div className="mr-side-section__title">{user?.globalRole === "admin" ? "管理项目" : "参与项目"}</div>
-                  {sharedProjects.length === 0 ? (
-                  <div className="mr-panel" style={{ padding: 12, boxShadow: "none", color: "var(--muted)", lineHeight: 1.6 }}>
-                    {user?.globalRole === "admin" ? "暂无其他用户项目。" : "暂无参与项目，后续这里会展示你加入的项目。"}
-                  </div>
-                ) : (
-                  <div style={{ display: "grid", gap: 8 }}>
-                    {sharedProjects.map((project) => {
-                      const active = project.id === effectivePid && scope !== "trash";
-                      const groupIds = sharedProjects.map((item) => item.id);
-                      const dragging = dragProjectId === project.id;
-                      const dragOver = dragOverProjectId === project.id && dragProjectId !== project.id;
-                      return (
-                        <div
-                          key={project.id}
-                          className={`mr-project-row${active ? " mr-project-row--active" : ""}${dragging ? " mr-project-row--dragging" : ""}${dragOver ? " mr-project-row--drag-over" : ""}`}
-                          draggable
-                          onDragStart={(event) => onProjectDragStart(project.id, event)}
-                          onDragOver={(event) => onProjectDragOver(project.id, event)}
-                          onDrop={(event) => onProjectDrop(project.id, groupIds, event)}
-                          onDragEnd={onProjectDragEnd}
-                        >
-                          <div className="mr-project-row__grip" onClick={(event) => event.stopPropagation()} title="拖动排序" aria-hidden="true">
-                            ⋮⋮
-                          </div>
-                          <button
-                            type="button"
-                            className="mr-project-row__main"
-                            onClick={() => setQuery({ pid: project.id, fid: `root-${project.id}`, scope: null, q: null, sel: null })}
-                            title={project.name}
-                          >
-                            <span className="mr-project-row__name">{project.name}</span>
-                          </button>
-                          <button
-                            type="button"
-                            className="mr-project-row__menu"
-                            aria-label={`项目菜单：${project.name}`}
-                            onClick={(event) => openAnchoredContextMenu(event, { kind: "project", id: project.id, name: project.name, ownerId: project.ownerId })}
-                          >
-                            •••
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  )}
-                </div>
+                <WorkspaceProjectList projects={myProjects} title="我的项目" emptyLabel="还没有项目，先创建一个开始整理视频素材。" activeId={scope === "workspace" ? effectivePid : null} dragId={dragProjectId} dragOverId={dragOverProjectId} onOpen={onWorkspaceProjectOpen} onMenu={onWorkspaceProjectMenu} onDragStart={onWorkspaceProjectDragStart} onDragOver={onWorkspaceProjectDragOver} onDrop={onWorkspaceProjectDrop} onDragEnd={onWorkspaceProjectDragEnd} />
+                <WorkspaceProjectList projects={sharedProjects} title={user.globalRole === "admin" ? "管理项目" : "参与项目"} emptyLabel={user.globalRole === "admin" ? "暂无其他用户项目。" : "暂无参与项目，后续这里会展示你加入的项目。"} activeId={scope === "workspace" ? effectivePid : null} dragId={dragProjectId} dragOverId={dragOverProjectId} onOpen={onWorkspaceProjectOpen} onMenu={onWorkspaceProjectMenu} onDragStart={onWorkspaceProjectDragStart} onDragOver={onWorkspaceProjectDragOver} onDrop={onWorkspaceProjectDrop} onDragEnd={onWorkspaceProjectDragEnd} />
               </div>
             </>
           }
           center={
             <>
               {feedback ? <div className={`mr-feedback mr-feedback--${feedback.tone}`}>{feedback.message}</div> : null}
-              {!currentProject ? (
-                <div className="mr-panel" style={{ padding: 22, boxShadow: "none", minHeight: 280, display: "grid", placeItems: "center", textAlign: "center" }}>
+              {projectsLoading && !currentProject ? <div role="status">正在加载项目…</div> : projectsError ? (
+                <div role="alert">{toZhError(projectsError)} <button className="mr-btn" type="button" onClick={() => void refreshWorkspaces()}>重试</button></div>
+              ) : !currentProject ? (
+                <div className="mr-workspace-empty">
                   <div>
-                    <div style={{ fontWeight: 900, fontSize: 20 }}>还没有任何项目</div>
+                    <div className="mr-workspace-empty__title">还没有项目</div>
                     <div style={{ marginTop: 10, color: "var(--muted)", lineHeight: 1.7 }}>先在左侧点击“新建项目”，创建一个项目后再上传视频或整理文件夹。</div>
                   </div>
                 </div>
               ) : (
                 <>
-                  <div className="mr-panel" style={{ padding: 14, boxShadow: "none", minHeight: 360 }} onContextMenu={(event) => openContextMenu(event, "workspace")}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+                  <div className="mr-workspace-browser" onContextMenu={(event) => openContextMenu(event, "workspace")}>
+                <div className="mr-workspace-heading">
                   <div>
-                    <div style={{ opacity: 0.7, fontSize: 12 }}>{scope === "trash" ? "项目回收站" : "项目内容"}</div>
-                    <div style={{ fontWeight: 900, marginTop: 6 }}>{currentProject?.name ?? "未选择项目"}</div>
+                    <div className="mr-workspace-eyebrow">{scope === "trash" ? "项目回收站" : "项目内容"}</div>
+                    <h1 className="mr-workspace-title">{currentProject?.name ?? "未选择项目"}</h1>
                     {scope === "trash" ? (
                       <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 13 }}>已删除视频会先进入回收站，可在这里恢复。</div>
                     ) : (
-                      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6, flexWrap: "wrap", color: "var(--muted)", fontSize: 13 }}>
+                      <div className="mr-workspace-breadcrumbs">
                         <button
                           type="button"
-                          className="mr-btn"
+                          className="mr-btn mr-btn--icon mr-tooltip"
                           onClick={() => {
                             if (!canGoUpFolder || !effectivePid) return;
                             setQuery({ pid: effectivePid, fid: parentFolderId ?? rootFid, q: null, sel: null });
                           }}
                           disabled={!canGoUpFolder}
                           title={canGoUpFolder ? "返回上一级" : "当前已在根目录"}
-                          style={{ padding: "4px 10px" }}
+                          aria-label="返回上一级"
+                          data-tooltip="返回上一级"
                         >
-                          返回上一级
+                          <IconUp />
                         </button>
                         <button
                           type="button"
@@ -3391,12 +3236,9 @@ export default function AppClient() {
                       </div>
                     )}
                   </div>
-                  <div style={{ opacity: 0.7, fontSize: 12, fontFamily: "var(--font-mono), ui-monospace" }}>
-                    {formatViewLabel(view)} · {formatSortLabel(sort)}
-                  </div>
                 </div>
 
-                <div style={{ marginTop: 14, display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                <div className="mr-workspace-toolbar">
                   <div className="mr-toolbar-group">
                     {scope === "trash" ? (
                       <>
@@ -3415,21 +3257,24 @@ export default function AppClient() {
                     ) : (
                       <>
                         <button className="mr-btn mr-btn--primary" type="button" onClick={() => openUploadDialog()} disabled={!canEditAssets}>
-                          上传视频
+                          <IconUpload />上传视频
                         </button>
-                        <button className="mr-btn" type="button" onClick={() => openCreateFolderDialog()} disabled={!canEditAssets}>
-                          新建文件夹
+                        <button className="mr-btn mr-btn--icon mr-tooltip" type="button" aria-label="新建文件夹" title="新建文件夹" data-tooltip="新建文件夹" onClick={() => openCreateFolderDialog()} disabled={!canEditAssets}>
+                          <IconNewFolder />
                         </button>
-                        <button className="mr-btn" type="button" onClick={() => setQuery({ scope: "trash", sel: null, q: null })}>
-                          回收站 ({trashItems.length})
+                        <button className="mr-btn mr-btn--icon mr-tooltip" type="button" aria-label={trashLoaded ? `回收站 (${trashItems.length})` : "回收站"} title="回收站" data-tooltip={trashLoaded ? `回收站 (${trashItems.length})` : "回收站"} onClick={() => setQuery({ scope: "trash", sel: null, q: null })}>
+                          <IconDelete />
                         </button>
                       </>
                     )}
                   </div>
                   <div className="mr-toolbar-group">
+                    <button className="mr-btn mr-btn--icon mr-tooltip" type="button" aria-label="刷新当前目录" title="刷新当前目录" data-tooltip="刷新当前目录" onClick={() => void (scope === "trash" ? refreshTrash() : refreshWorkspace())}>
+                      <IconRefresh size={18} stroke={1.5} aria-hidden="true" />
+                    </button>
                     {scope === "workspace" ? (
                       <>
-                        <button className="mr-btn" type="button" onClick={() => {
+                        <button className="mr-btn mr-btn--icon mr-tooltip" type="button" aria-label={selectionMode ? `退出多选 (${selectedIds.size})` : "多选"} title={selectionMode ? "退出多选" : "多选"} data-tooltip={selectionMode ? `退出多选 (${selectedIds.size})` : "多选"} aria-pressed={selectionMode} onClick={() => {
                           if (selectionMode) {
                             clearSelection();
                             setQuery({ select: "0" });
@@ -3437,30 +3282,21 @@ export default function AppClient() {
                             setQuery({ select: "1" });
                           }
                         }}>
-                          {selectionMode ? `退出多选 (${selectedIds.size})` : "多选"}
+                          <IconSelect />
                         </button>
-                        <button className="mr-btn" type="button" onClick={() => openRenameDialog()} disabled={renameDisabled} title={renameHint}>
-                          重命名
+                        <button className="mr-btn mr-btn--icon mr-tooltip" type="button" aria-label="重命名" data-tooltip="重命名" onClick={() => openRenameDialog()} disabled={renameDisabled} title={renameHint}>
+                          <IconRename />
                         </button>
-                        <button className="mr-btn mr-btn--danger" type="button" onClick={() => void onDeleteSelected()} disabled={!selectionMode || selectedIds.size === 0 || !canEditAssets}>
-                          删除
+                        <button className="mr-btn mr-btn--danger mr-btn--icon mr-tooltip" type="button" aria-label="删除" title="删除" data-tooltip="删除" onClick={() => void onDeleteSelected()} disabled={!selectionMode || selectedIds.size === 0 || !canEditAssets}>
+                          <IconDelete />
                         </button>
                       </>
                     ) : null}
                   </div>
-                  <div className="mr-toolbar-group">
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid var(--border2)", borderRadius: 999, padding: "8px 12px", background: "var(--surface-1)", minWidth: 260 }}>
-                      <IconSearch size={16} />
-                      <input
-                        aria-label="搜索"
-                        placeholder={scope === "trash" ? "搜索回收站…" : "搜索当前项目…"}
-                        value={q}
-                        onChange={(e) => setQuery({ q: e.target.value })}
-                        style={{ border: 0, outline: "none", background: "transparent", color: "var(--text)", width: "100%" }}
-                      />
-                    </div>
-                    <button className="mr-btn" type="button" onClick={() => setQuery({ view: view === "grid" ? "list" : "grid" })}>
-                      {view === "grid" ? "列表视图" : "网格视图"}
+                  <div className="mr-toolbar-group mr-workspace-filters">
+                    <WorkspaceSearch key={`${user.id}:${effectivePid}:${effectiveFid}:${scope}`} query={q} scope={scope} onQuery={onWorkspaceSearch} />
+                    <button className="mr-btn mr-btn--icon mr-tooltip" type="button" aria-label={view === "grid" ? "列表视图" : "网格视图"} title={view === "grid" ? "列表视图" : "网格视图"} data-tooltip={view === "grid" ? "列表视图" : "网格视图"} onClick={() => setQuery({ view: view === "grid" ? "list" : "grid" })}>
+                      {view === "grid" ? <IconList /> : <IconGrid />}
                     </button>
                     <div style={{ position: "relative" }}>
                       <button
@@ -3528,141 +3364,18 @@ export default function AppClient() {
                   </div>
                 ) : null}
 
-                {visibleItems.length === 0 ? (
-                  <div className="mr-panel" style={{ marginTop: 18, padding: 18, boxShadow: "none", background: "var(--panel3)" }}>
-                    <div style={{ fontWeight: 800 }}>{scope === "trash" ? "回收站还是空的" : "这里还是空的"}</div>
+                {activeDataLoading ? <div className="mr-workbench-status" role="status">正在加载{scope === "trash" ? "回收站" : "素材"}…</div> : null}
+                {activeDataError ? <div className="mr-workbench-status" role="alert">{toZhError(activeDataError)} <button className="mr-btn" type="button" onClick={() => void (scope === "trash" ? refreshTrash() : refreshWorkspace())}>重试</button></div> : null}
+                {!activeDataLoading && !activeDataError && visibleItems.length === 0 ? (
+                  <div className="mr-workspace-empty">
+                    <div className="mr-workspace-empty__title">{scope === "trash" ? "回收站为空" : "还没有素材"}</div>
                     <div style={{ marginTop: 6, color: "var(--muted)", lineHeight: 1.6 }}>
                       {scope === "trash" ? "删除后的视频会显示在这里。" : "先创建文件夹，再把视频上传进去。现在默认没有任何预设文件夹。"}
                     </div>
                   </div>
-                ) : view === "list" ? (
-                  <div style={{ marginTop: 12, display: "grid", gap: 6 }}>
-                    {visibleItems.map((it) => {
-                      const selected = selectedIds.has(it.id);
-                      const deletedAt = "deletedAt" in it && typeof it.deletedAt === "number" ? it.deletedAt : null;
-                      const isTrashVideo = scope === "trash" && it.kind === "video";
-                      return (
-                        <div
-                          key={it.id}
-                          className={`mr-panel mr-item-row${selected ? " mr-item-row--selected" : ""}`}
-                          onContextMenu={(event) => openContextMenu(event, it)}
-                        >
-                          <button
-                            type="button"
-                            className="mr-item-row__surface"
-                            onClick={() => {
-                              void handleItemClick(it);
-                            }}
-                          >
-                            {scope === "workspace" && selectionMode ? (
-                              <input
-                                type="checkbox"
-                                checked={selected}
-                                onChange={() => toggleSelected(it.id)}
-                                onClick={(event) => event.stopPropagation()}
-                                aria-label="选择"
-                              />
-                            ) : null}
-
-                            <div style={{ width: 26, opacity: 0.85 }}>
-                              {it.kind === "folder" ? <IconFolder size={18} /> : <IconVideo size={18} />}
-                            </div>
-                            <div style={{ flex: 1, minWidth: 0 }} title={it.name}>
-                              <div style={{ fontWeight: 850, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</div>
-                              <div style={{ opacity: 0.65, fontSize: 12, marginTop: 4 }}>
-                                {it.kind === "video"
-                                  ? `${formatDuration(it.durationSeconds)} · ${formatBytes(it.sizeBytes)} · ${formatFrames(it)} · ${formatResolution(it)} · ${formatBitrate(it)}`
-                                  : "文件夹"}
-                              </div>
-                              {isTrashVideo ? (
-                                <div style={{ opacity: 0.6, fontSize: 12, marginTop: 4 }}>
-                                  删除于 {deletedAt ? new Date(deletedAt).toLocaleString("zh-CN") : "-"}
-                                </div>
-                              ) : null}
-                            </div>
-                            <div style={{ width: 140, opacity: 0.65, fontSize: 12, textAlign: "right" }}>
-                              {new Date(it.updatedAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
-                            </div>
-                          </button>
-                          <button
-                            type="button"
-                            className="mr-item-action mr-item-row__menu"
-                            aria-label={`条目菜单：${it.name}`}
-                            onClick={(event) => openAnchoredContextMenu(event, it)}
-                          >
-                            <span aria-hidden="true">⋯</span>
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 10 }}>
-                    {visibleItems.map((it) => {
-                      const selected = selectedIds.has(it.id);
-                      const deletedAt = "deletedAt" in it && typeof it.deletedAt === "number" ? it.deletedAt : null;
-                      const isTrashVideo = scope === "trash" && it.kind === "video";
-                      return (
-                        <div
-                          key={it.id}
-                          className={`mr-panel mr-card-button${selected ? " mr-card-button--selected" : ""}`}
-                          onContextMenu={(event) => openContextMenu(event, it)}
-                        >
-                          <button
-                            type="button"
-                            className="mr-card-button__surface"
-                            onClick={() => {
-                              void handleItemClick(it);
-                            }}
-                          >
-                            <div
-                              className={`mr-card-button__preview${it.kind === "folder" ? " mr-card-button__preview--folder" : " mr-card-button__preview--video"}`}
-                            >
-                              {it.kind === "folder" ? <IconFolder size={22} /> : <VideoCardPreview name={it.name} previewUrl={it.thumbnailUrl ?? thumbnailUrls[it.id]} />}
-                              {scope === "workspace" && selectionMode ? (
-                                <span style={{ position: "absolute", top: 8, left: 8 }}>
-                                  <input
-                                    type="checkbox"
-                                    checked={selected}
-                                    onChange={() => toggleSelected(it.id)}
-                                    onClick={(event) => event.stopPropagation()}
-                                    aria-label="选择"
-                                  />
-                                </span>
-                              ) : null}
-                            </div>
-
-                            <div className="mr-card-button__body">
-                              <div className="mr-card-button__content" title={it.name}>
-                                <div className="mr-card-button__title">
-                                  {it.name}
-                                </div>
-                                <div className="mr-card-button__meta">
-                                  {it.kind === "video" ? (
-                                    <>
-                                      <div>{formatBytes(it.sizeBytes)} · {formatDuration(it.durationSeconds)}</div>
-                                      <div>{formatFrames(it)} · {formatResolution(it)}</div>
-                                      <div>{formatBitrate(it)}</div>
-                                      {isTrashVideo ? <div>删除于 {deletedAt ? new Date(deletedAt).toLocaleString("zh-CN") : "-"}</div> : null}
-                                    </>
-                                  ) : "文件夹"}
-                                </div>
-                              </div>
-                            </div>
-                          </button>
-                          <button
-                            type="button"
-                            className="mr-item-action mr-item-action--overlay mr-card-button__menu"
-                            aria-label={`条目菜单：${it.name}`}
-                            onClick={(event) => openAnchoredContextMenu(event, it)}
-                          >
-                            <span aria-hidden="true">⋯</span>
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                ) : visibleItems.length > 0 && !activeDataError ? (
+                  <WorkspaceItems key={`${user?.id}:${effectivePid}:${effectiveFid}:${scope}`} filterKey={`${q}:${sort}`} items={visibleItems} view={view} scope={scope} selectedIds={selectedIds} selectionMode={selectionMode} onOpen={onWorkspaceItemOpen} onSelect={onWorkspaceItemSelect} onContextMenu={onWorkspaceItemContext} onMenu={onWorkspaceItemMenu} />
+                ) : null}
               </div>
               {contextMenu ? (
                 <div
@@ -3722,6 +3435,8 @@ export default function AppClient() {
                         </button>
                         {contextMenu.target.kind === "video" ? (
                           <>
+                            <button className="mr-btn" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("versions")}>版本历史</button>
+                            <button className="mr-btn" type="button" style={{ width: "100%", justifyContent: "flex-start" }} disabled={!canEditAssets} onClick={() => handleContextMenuAction("upload_version")}>上传新版本</button>
                             <button className="mr-btn" type="button" style={{ width: "100%", justifyContent: "flex-start" }} onClick={() => handleContextMenuAction("video_permissions")}>
                               视频权限
                             </button>
@@ -3767,7 +3482,7 @@ export default function AppClient() {
                   currentProject ? (
                     <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
                       <div>
-                        <div style={{ fontWeight: 900 }}>{currentProject.name}</div>
+                        <div className="mr-inspector-project-name">{currentProject.name}</div>
                         <div style={{ marginTop: 4, color: "var(--muted)", fontSize: 13 }}>
                           {scope === "trash" ? "当前查看：回收站" : `当前目录：${currentFolderName}`}
                         </div>
@@ -3797,7 +3512,7 @@ export default function AppClient() {
                         <strong>{currentProjectRoleLabel}</strong>
                       </div>
                       {canProject(currentProject, "project:manage_members") ? (
-                        <button className="mr-btn mr-btn--primary" type="button" onClick={() => openCollaborationDialog(currentProject)}>
+                        <button className="mr-btn" type="button" onClick={() => openCollaborationDialog(currentProject)}>
                           协作成员
                         </button>
                       ) : null}
@@ -3807,6 +3522,20 @@ export default function AppClient() {
                   )
                 ) : null}
               </div>
+              {inspectorPaneOpen && activeVersionTarget ? <MediaVersions
+                key={`${workspaceScopeKey}:${activeVersionTarget.mediaId}`}
+                className="mr-workspace-versions"
+                mediaId={activeVersionTarget.mediaId}
+                refreshKey={versionRefreshKey}
+                onSelect={(mediaId) => void openUploadItem(mediaId, true)}
+                onUploadVersion={canEditAssets ? (mediaId) => openUploadDialog(mediaId) : undefined}
+                onDeleted={() => {
+                  void refreshWorkspace().then((data) => {
+                    if (data) setVersionTarget(null);
+                  });
+                  void refreshTrash();
+                }}
+              /> : null}
               {preferences.showUploadQueue ? (
                 <UploadPanel
                   uploads={uploads}

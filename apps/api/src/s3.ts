@@ -18,6 +18,8 @@ export const s3 = new S3Client({
   region: env.S3_REGION,
   endpoint: env.S3_ENDPOINT,
   forcePathStyle: true,
+  // Avoid the SDK's optional checksum stream leaving rejected promises on upload abort.
+  requestChecksumCalculation: "WHEN_REQUIRED",
   requestHandler: new NodeHttpHandler({
     connectionTimeout: 5000,
     socketTimeout: 20000
@@ -133,15 +135,32 @@ export async function putObjectStream(args: {
   contentType?: string;
   contentLength?: number;
 }) {
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: args.bucket,
-      Key: args.objectKey,
-      Body: args.body,
-      ContentType: args.contentType,
-      ContentLength: args.contentLength
-    })
-  );
+  const controller = new AbortController();
+  let sourceError: Error | undefined;
+  const onError = (error: Error) => {
+    sourceError = error;
+    controller.abort();
+  };
+  args.body.on("error", onError);
+  try {
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: args.bucket,
+        Key: args.objectKey,
+        Body: args.body,
+        ContentType: args.contentType,
+        ContentLength: args.contentLength
+      }),
+      { abortSignal: controller.signal }
+    );
+  } catch (error) {
+    throw sourceError ?? error;
+  } finally {
+    // Keep the error handler until close, including failures after S3 has responded.
+    if (!args.body.readableEnded && !args.body.destroyed) args.body.resume();
+    if (args.body.closed) args.body.removeListener("error", onError);
+    else args.body.once("close", () => args.body.removeListener("error", onError));
+  }
 }
 
 export async function statObject(args: {

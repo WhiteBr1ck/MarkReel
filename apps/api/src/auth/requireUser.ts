@@ -2,6 +2,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { getStore } from "../store";
 import { ACCESS_COOKIE, authInstanceId, clearAccessCookie, parseAuthTokenPayload } from "./tokens";
 import type { UserGlobalRole } from "../store/types";
+import { bearerApiToken, resolveApiToken } from "./apiTokens";
 
 export type CurrentUser = {
   id: string;
@@ -16,6 +17,21 @@ export type CurrentUser = {
 
 export async function requireUser(req: FastifyRequest, reply: FastifyReply) {
   try {
+    if (req.headers.authorization?.toLowerCase().startsWith("bearer mr_token_")) {
+      const token = bearerApiToken(req);
+      const access = token ? await resolveApiToken(token) : null;
+      if (!access) return reply.header("www-authenticate", 'Bearer realm="MarkReel"').code(401).send({ error: "unauthorized" });
+      req.apiTokenReadOnly = access.record.readOnly;
+      if (access.record.readOnly && !["GET", "HEAD", "OPTIONS"].includes(req.method) && req.routeOptions.url !== "/api/mcp") {
+        return reply.code(403).send({ error: "read_only_token" });
+      }
+      const user = access.user;
+      (req as FastifyRequest & { user: CurrentUser }).user = {
+        id: user.id, username: user.username, displayName: user.displayName, avatarObjectKey: user.avatarObjectKey,
+        avatarContentType: user.avatarContentType, avatarPreset: user.avatarPreset, globalRole: user.globalRole, createdAt: user.createdAt
+      };
+      return;
+    }
     const rawPayload = await (req as any).jwtVerify({ cookie: { cookieName: ACCESS_COOKIE } });
     const payload = parseAuthTokenPayload(rawPayload);
     if (!payload || payload.si !== authInstanceId) {

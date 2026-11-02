@@ -7,6 +7,8 @@ import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent }
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Dialog } from "../_components/dialog";
 import { api } from "../_components/api";
+import { useTheme } from "../_components/theme";
+import { McpAccessPanel } from "./mcp-access-panel";
 
 type ApiUser = {
   id: string;
@@ -139,6 +141,7 @@ function drawCroppedAvatar(crop: CropState): Promise<File> {
 }
 
 export default function UserSettingsPage() {
+  useTheme();
   const router = useRouter();
   const avatarFileInputRef = useRef<HTMLInputElement | null>(null);
   const [backHref, setBackHref] = useState("/app");
@@ -391,7 +394,7 @@ export default function UserSettingsPage() {
   }
 
   return (
-    <main className="mr-page">
+    <main className="mr-page mr-page--settings">
       <div className="mr-page__shell">
         <section className="mr-panel mr-page__hero">
           <div className="mr-page__hero-head">
@@ -409,6 +412,7 @@ export default function UserSettingsPage() {
         {message ? <div className="mr-feedback mr-feedback--success">{message}</div> : null}
 
         <div className="mr-page__grid">
+          {user ? <McpAccessPanel /> : null}
           <section className="mr-panel mr-page__card">
             <div className="mr-page__section-kicker">Profile</div>
             <h2 className="mr-page__section-title">个人资料</h2>

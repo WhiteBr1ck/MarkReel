@@ -26,4 +26,5 @@ echo "Applying Prisma schema (db push)..."
 npm -w @markreel/api run db:push
 
 echo "Starting API..."
-npm -w @markreel/api run start:dev
+cd /app/apps/api
+exec node --import tsx src/main.ts

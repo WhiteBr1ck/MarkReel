@@ -5,6 +5,7 @@ coverage/
 *.tsbuildinfo
 .turbo/
 .cache/
+.tmp/
 tmp/
 temp/
 

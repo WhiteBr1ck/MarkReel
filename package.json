@@ -1,6 +1,6 @@
 {
   "name": "markreel",
-  "version": "0.2.16",
+  "version": "0.2.17",
   "description": "Open-source self-hosted video review and annotation tool.",
   "private": true,
   "packageManager": "npm@10.9.3",
@@ -16,7 +16,11 @@
     "up": "docker compose up -d --build",
     "down": "docker compose down",
     "logs": "docker compose logs -f --tail=200",
-    "test": "npm -ws test"
+    "test": "node --test scripts/*.test.mjs && npm -ws test",
+    "pretest": "npm run version:check",
+    "version": "node scripts/version.mjs --sync",
+    "version:check": "node scripts/version.mjs --check",
+    "release:version": "node scripts/version.mjs --set"
   },
   "keywords": [],
   "author": "",

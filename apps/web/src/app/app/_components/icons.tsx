@@ -1,198 +1,43 @@
 import type { CSSProperties } from "react";
+import {
+  IconAdjustmentsHorizontal, IconArrowUp, IconBrightnessAuto, IconChecks,
+  IconChevronRight, IconDots, IconFolder as Folder, IconFolderPlus,
+  IconGripVertical, IconInfoCircle, IconLayoutGrid, IconList as List,
+  IconMoon as Moon, IconPencil, IconPlus as Plus, IconSearch as Search,
+  IconSortDescending, IconSun as Sun, IconTrash, IconUpload as Upload,
+  IconVideo as Video
+} from "@tabler/icons-react";
 
-type IconProps = {
-  size?: number;
-  style?: CSSProperties;
-};
+type IconProps = { size?: number; style?: CSSProperties };
 
-function base(size: number): CSSProperties {
-  return {
-    width: size,
-    height: size,
-    display: "inline-block",
-    verticalAlign: "middle"
+function icon(Component: typeof Folder) {
+  return function InterfaceIcon({ size = 18, style }: IconProps) {
+    return <Component size={size} stroke={1.5} aria-hidden="true" style={{ display: "inline-block", verticalAlign: "middle", flexShrink: 0, ...style }} />;
   };
 }
 
-export function IconGrid({ size = 18, style }: IconProps) {
-  const s = base(size);
-  return (
-    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M4 4h7v7H4z" />
-      <path d="M13 4h7v7h-7z" />
-      <path d="M4 13h7v7H4z" />
-      <path d="M13 13h7v7h-7z" />
-    </svg>
-  );
-}
+export const IconGrid = icon(IconLayoutGrid);
+export const IconList = icon(List);
+export const IconSearch = icon(Search);
+export const IconAutoTheme = icon(IconBrightnessAuto);
+export const IconSun = icon(Sun);
+export const IconMoon = icon(Moon);
+export const IconInfo = icon(IconInfoCircle);
+export const IconSettings = icon(IconAdjustmentsHorizontal);
+export const IconVideo = icon(Video);
+export const IconFolder = icon(Folder);
+export const IconUpload = icon(Upload);
+export const IconPlus = icon(Plus);
+export const IconSort = icon(IconSortDescending);
+export const IconUp = icon(IconArrowUp);
+export const IconNewFolder = icon(IconFolderPlus);
+export const IconRename = icon(IconPencil);
+export const IconDelete = icon(IconTrash);
+export const IconSelect = icon(IconChecks);
+export const IconMore = icon(IconDots);
+export const IconGrip = icon(IconGripVertical);
 
-export function IconList({ size = 18, style }: IconProps) {
-  const s = base(size);
-  return (
-    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M8 6h13" />
-      <path d="M8 12h13" />
-      <path d="M8 18h13" />
-      <path d="M3.5 6h.5" />
-      <path d="M3.5 12h.5" />
-      <path d="M3.5 18h.5" />
-    </svg>
-  );
-}
-
-export function IconSearch({ size = 18, style }: IconProps) {
-  const s = base(size);
-  return (
-    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15z" />
-      <path d="M16.5 16.5 21 21" />
-    </svg>
-  );
-}
-
-export function IconAutoTheme({ size = 18, style }: IconProps) {
-  const s = base(size);
-  return (
-    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 17.2a5.2 5.2 0 1 0 0-10.4 5.2 5.2 0 0 0 0 10.4z" />
-      <path d="M12 1.8v2.1" />
-      <path d="M12 20.1v2.1" />
-      <path d="M4.1 12H2" />
-      <path d="M22 12h-2.1" />
-      <path d="M5.4 5.4 3.9 3.9" />
-      <path d="M20.1 20.1 18.6 18.6" />
-      <path d="M18.6 5.4 20.1 3.9" />
-      <path d="M3.9 20.1 5.4 18.6" />
-      <path d="M9.15 14.25 12 8.35l2.85 5.9" strokeWidth="1.9" />
-      <path d="M10.15 12.35h3.7" strokeWidth="1.9" />
-    </svg>
-  );
-}
-
-export function IconSun({ size = 18, style }: IconProps) {
-  const s = base(size);
-  return (
-    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10z" />
-      <path d="M12 1.8v2.4" />
-      <path d="M12 19.8v2.4" />
-      <path d="M4.2 12H1.8" />
-      <path d="M22.2 12h-2.4" />
-      <path d="M5.2 5.2 3.5 3.5" />
-      <path d="M20.5 20.5 18.8 18.8" />
-      <path d="M18.8 5.2 20.5 3.5" />
-      <path d="M3.5 20.5 5.2 18.8" />
-    </svg>
-  );
-}
-
-export function IconMoon({ size = 18, style }: IconProps) {
-  const s = base(size);
-  return (
-    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M21 14.2A8.5 8.5 0 0 1 9.8 3a7.2 7.2 0 1 0 11.2 11.2z" />
-    </svg>
-  );
-}
-
-export function IconInfo({ size = 18, style }: IconProps) {
-  const s = base(size);
-  return (
-    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M4.75 6.75a2 2 0 0 1 2-2h10.5a2 2 0 0 1 2 2v10.5a2 2 0 0 1-2 2H6.75a2 2 0 0 1-2-2z" />
-      <path d="M12 10.25v5.25" />
-      <path d="M12 7.8h.01" />
-    </svg>
-  );
-}
-
-export function IconSettings({ size = 18, style }: IconProps) {
-  const s = base(size);
-  return (
-    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M4.5 7.25h6" />
-      <path d="M15.5 7.25h4" />
-      <path d="M13 7.25a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0z" />
-      <path d="M4.5 12h10" />
-      <path d="M17.5 12h2" />
-      <path d="M19 12a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0z" />
-      <path d="M4.5 16.75h3" />
-      <path d="M12.5 16.75h7" />
-      <path d="M10 16.75a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0z" />
-    </svg>
-  );
-}
-
-export function IconVideo({ size = 18, style }: IconProps) {
-  const s = base(size);
-  return (
-    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3.5" y="6" width="12.5" height="12" rx="2.5" />
-      <path d="m16 10 4.5-2.8v9.6L16 14" />
-    </svg>
-  );
-}
-
-export function IconFolder({ size = 18, style }: IconProps) {
-  const s = base(size);
-  return (
-    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M3.5 7.5h6l2 2h9c.6 0 1 .4 1 1v9c0 .6-.4 1-1 1h-17c-.6 0-1-.4-1-1v-11c0-.6.4-1 1-1z" />
-    </svg>
-  );
-}
-
-export function IconChevron({
-  size = 18,
-  style,
-  dir = "right" as "right" | "left" | "down"
-}: IconProps & { dir?: "right" | "left" | "down" }) {
-  const st = style as CSSProperties | undefined;
-  const s = base(size);
-  const rot = dir === "down" ? "rotate(90deg)" : dir === "left" ? "rotate(180deg)" : "rotate(0deg)";
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      style={{ ...s, ...st, transform: `${rot} ${st?.transform ?? ""}`.trim() }}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.9"
-    >
-      <path d="M9 6l6 6-6 6" />
-    </svg>
-  );
-}
-
-export function IconUpload({ size = 18, style }: IconProps) {
-  const s = base(size);
-  return (
-    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M12 16V4" />
-      <path d="M7 9l5-5 5 5" />
-      <path d="M4 20h16" />
-    </svg>
-  );
-}
-
-export function IconPlus({ size = 18, style }: IconProps) {
-  const s = base(size);
-  return (
-    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M12 5v14" />
-      <path d="M5 12h14" />
-    </svg>
-  );
-}
-
-export function IconSort({ size = 18, style }: IconProps) {
-  const s = base(size);
-  return (
-    <svg viewBox="0 0 24 24" style={{ ...s, ...style }} fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M7 6h14" />
-      <path d="M7 12h10" />
-      <path d="M7 18h6" />
-      <path d="M3 7l2-2 2 2" />
-      <path d="M5 5v14" />
-    </svg>
-  );
+export function IconChevron({ size = 18, style, dir = "right" }: IconProps & { dir?: "right" | "left" | "down" }) {
+  const rotation = dir === "down" ? "rotate(90deg)" : dir === "left" ? "rotate(180deg)" : "rotate(0deg)";
+  return <IconChevronRight size={size} stroke={1.5} aria-hidden="true" style={{ display: "inline-block", verticalAlign: "middle", flexShrink: 0, ...style, transform: `${rotation} ${style?.transform ?? ""}`.trim() }} />;
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { assertDeletedCredentialsStayInvalid } from "./credentialLifecycleFixture";
 
 process.env.MARKREEL_SKIP_BOOTSTRAP = "true";
 process.env.MARKREEL_STORE = "inmemory";
@@ -19,6 +20,32 @@ process.env.MARKREEL_ADMIN_USERNAME = "admin";
 process.env.MARKREEL_ADMIN_PASSWORD = "adminadmin";
 
 const appModule = import("../main");
+
+test("deleted accounts cannot revive old tokens or sessions when recreated in memory store", async () => {
+  const app = await createApp();
+  try { await assertDeletedCredentialsStayInvalid(app, "revive_mem"); }
+  finally { await app.close(); }
+});
+
+test("personal API tokens honor revocation, read-only mode and password/session changes in memory store", async () => {
+  const app = await createApp();
+  try {
+    const registered = await app.inject({ method: "POST", url: "/api/auth/register", payload: { username: "token_memory", password: "password123" } });
+    const cookie = cookieHeader(registered);
+    const created = await app.inject({ method: "POST", url: "/api/users/me/api-tokens", headers: { cookie }, payload: { name: "AI" } });
+    assert.equal(created.statusCode, 201);
+    const token = created.json().token as string;
+    const tokenId = created.json().apiToken.id as string;
+    assert.equal((await app.inject({ method: "GET", url: "/api/me", headers: { authorization: `Bearer ${token}` } })).statusCode, 200);
+    const readonly = await app.inject({ method: "POST", url: "/api/users/me/api-tokens", headers: { cookie }, payload: { name: "Read only", readOnly: true } });
+    assert.equal((await app.inject({ method: "POST", url: "/api/projects", headers: { authorization: `Bearer ${readonly.json().token}` }, payload: { name: "Denied" } })).statusCode, 403);
+    assert.equal((await app.inject({ method: "DELETE", url: `/api/users/me/api-tokens/${tokenId}`, headers: { cookie } })).statusCode, 200);
+    assert.equal((await app.inject({ method: "GET", url: "/api/me", headers: { authorization: `Bearer ${token}` } })).statusCode, 401);
+    const changed = await app.inject({ method: "POST", url: "/api/users/me/change-password", headers: { cookie }, payload: { currentPassword: "password123", newPassword: "newpassword123" } });
+    assert.equal(changed.statusCode, 200);
+    assert.equal((await app.inject({ method: "GET", url: "/api/me", headers: { authorization: `Bearer ${readonly.json().token}` } })).statusCode, 401);
+  } finally { await app.close(); }
+});
 
 function cookieHeader(response: { cookies: Array<{ name: string; value: string }> }) {
   return response.cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");

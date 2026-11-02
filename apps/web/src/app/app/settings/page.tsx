@@ -106,7 +106,7 @@ export default function SettingsPage() {
   if (!authReady) return null;
 
   return (
-    <main className="mr-page">
+    <main className="mr-page mr-page--settings">
       <div className="mr-page__shell">
         <section className="mr-panel mr-page__hero">
           <div className="mr-page__hero-head">
@@ -128,14 +128,14 @@ export default function SettingsPage() {
             <div className="mr-page__stack">
               <div className="mr-field">
                 <div className="mr-field__label">{labels.settings.themeLabel}</div>
-                <div className="mr-page__actions">
+                <div className="mr-page__actions mr-segmented" role="group" aria-label={labels.settings.themeLabel}>
                   {THEMES.map((theme) => (
                     <button
                       key={theme}
-                      className={`mr-btn mr-btn--surface${preferences.theme === theme ? " mr-btn--primary" : ""}`}
+                      className={`mr-btn mr-btn--surface${preferences.theme === theme ? " mr-btn--selected" : ""}`}
                       type="button"
+                      aria-pressed={preferences.theme === theme}
                       onClick={() => patchPreferences({ theme })}
-                      disabled={preferences.theme === theme}
                     >
                       {themeLabelMap[theme]}
                     </button>
@@ -151,6 +151,7 @@ export default function SettingsPage() {
                       key={accent}
                       type="button"
                       className={`mr-page__swatch${preferences.accent === accent ? " mr-page__swatch--active" : ""}`}
+                      aria-pressed={preferences.accent === accent}
                       onClick={() => patchPreferences({ accent })}
                     >
                       <span className={`mr-page__swatch-dot mr-page__swatch-dot--${accent}`} />
@@ -205,6 +206,8 @@ export default function SettingsPage() {
               <button
                 type="button"
                 className="mr-page__toggle"
+                role="switch"
+                aria-checked={preferences.showUploadQueue}
                 onClick={() => patchPreferences({ showUploadQueue: !preferences.showUploadQueue })}
               >
                 <span>
@@ -219,6 +222,8 @@ export default function SettingsPage() {
               <button
                 type="button"
                 className="mr-page__toggle"
+                role="switch"
+                aria-checked={preferences.defaultInspectorOpen}
                 onClick={() => patchPreferences({ defaultInspectorOpen: !preferences.defaultInspectorOpen })}
               >
                 <span>
@@ -233,6 +238,8 @@ export default function SettingsPage() {
               <button
                 type="button"
                 className="mr-page__toggle"
+                role="switch"
+                aria-checked={preferences.rememberPlaybackPosition}
                 onClick={() => {
                   const next = !preferences.rememberPlaybackPosition;
                   patchPreferences({ rememberPlaybackPosition: next });

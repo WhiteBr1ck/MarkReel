@@ -6,6 +6,7 @@ import { getStore } from "../store";
 import { prisma } from "../db";
 import { getProjectAccess, hasCapability } from "../access";
 import { serializeSizeBytes } from "../mediaSerialization";
+import { groupMediaVersions } from "../mediaSeries";
 
 const CreateProjectSchema = z.object({
   name: z.string().min(1).max(120),
@@ -23,20 +24,6 @@ const WorkspaceQuerySchema = z.object({
 
 function hasBrokenText(value: string) {
   return value.includes("�");
-}
-
-function dedupeMediaByFolderAndTitle<T extends { id: string; folderId: string | null; title: string; createdAt: Date }>(items: T[]) {
-  const latestByKey = new Map<string, T>();
-
-  for (const item of items) {
-    const key = `${item.folderId ?? "root"}::${item.title}`;
-    const existing = latestByKey.get(key);
-    if (!existing || item.createdAt > existing.createdAt) {
-      latestByKey.set(key, item);
-    }
-  }
-
-  return Array.from(latestByKey.values());
 }
 
 function buildFolderTree(
@@ -204,11 +191,13 @@ export async function projectRoutes(app: FastifyInstance) {
       if (!exists) return reply.code(404).send({ error: "folder_not_found" });
     }
 
-    const media = dedupeMediaByFolderAndTitle(
+    const media = groupMediaVersions(
       await prisma.media.findMany({
-        where: { projectId, folderId: parentId, deletedAt: null },
+        where: { projectId, deletedAt: null, OR: [{ seriesId: null }, { series: { projectId, deletedAt: null } }] },
         select: {
           id: true,
+          seriesId: true,
+          versionIndex: true,
           folderId: true,
           title: true,
           updatedAt: true,
@@ -223,6 +212,8 @@ export async function projectRoutes(app: FastifyInstance) {
               bitrateKbps: true,
               frameCount: true,
               originalObjectKey: true,
+              mode: true,
+              derivedPrefix: true,
               thumbnailObjectKey: true
             },
             orderBy: { createdAt: "desc" },
@@ -231,7 +222,7 @@ export async function projectRoutes(app: FastifyInstance) {
         },
         orderBy: [{ updatedAt: "desc" }]
       })
-    );
+    ).filter((item) => item.folderId === parentId);
 
     const items = [
       ...folders
@@ -254,7 +245,10 @@ export async function projectRoutes(app: FastifyInstance) {
         frameCount: item.files[0]?.frameCount ?? undefined,
         bitrateKbps: item.files[0]?.bitrateKbps ?? undefined,
         thumbnailUrl: item.files[0]?.thumbnailObjectKey ? `/api/media/${item.id}/thumbnail/file` : null,
-        status: item.status
+        status: item.status,
+        seriesId: item.seriesId,
+        versionIndex: item.versionIndex,
+        versionCount: item.versionCount
       }))
     ];
 

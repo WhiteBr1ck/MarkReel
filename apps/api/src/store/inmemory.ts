@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { createRandomAvatarPreset } from "../avatarPresets";
 import { capabilitiesForRole } from "../access";
-import type { Store, StoreProject, StoreUser, StoreUserProfile } from "./types";
+import type { Store, StoreApiToken, StoreProject, StoreUser, StoreUserProfile } from "./types";
 
 const usersById = new Map<string, StoreUser>();
 const usersByUsername = new Map<string, string>();
 const projectsById = new Map<string, StoreProject>();
 const membershipsByUserId = new Map<string, Set<string>>();
+const apiTokens = new Map<string, StoreApiToken>();
 
 function now() {
   return new Date();
@@ -64,6 +65,27 @@ export function createInMemoryStore(): Store {
   return {
     kind: "inmemory",
 
+    async apiTokenCreate(args) {
+      const token: StoreApiToken = { ...args, id: randomUUID(), createdAt: now(), revokedAt: null, lastUsedAt: null };
+      apiTokens.set(token.tokenHash, token);
+      return token;
+    },
+    async apiTokenList(userId) {
+      const version = usersById.get(userId)?.sessionVersion;
+      return [...apiTokens.values()].filter((token) => token.userId === userId && token.sessionVersion === version && !token.revokedAt).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    },
+    async apiTokenFind(tokenHash) { return apiTokens.get(tokenHash) ?? null; },
+    async apiTokenRevoke({ userId, tokenId }) {
+      const token = [...apiTokens.values()].find((item) => item.id === tokenId && item.userId === userId && !item.revokedAt);
+      if (!token) return false;
+      token.revokedAt = now();
+      return true;
+    },
+    async apiTokenTouch(tokenId) {
+      const token = [...apiTokens.values()].find((item) => item.id === tokenId);
+      if (token) token.lastUsedAt = now();
+    },
+
     async userFindByUsername(username) {
       const id = usersByUsername.get(username.toLowerCase());
       if (!id) return null;
@@ -89,7 +111,7 @@ export function createInMemoryStore(): Store {
         existing.avatarContentType = null;
         existing.avatarPreset = createRandomAvatarPreset();
         existing.globalRole = args.globalRole ?? "user";
-        existing.sessionVersion = 1;
+        existing.sessionVersion += 1;
         existing.disabledAt = null;
         existing.updatedAt = now();
         existing.deletedAt = null;
@@ -123,6 +145,7 @@ export function createInMemoryStore(): Store {
       const existingId = usersByUsername.get(normalized);
       if (existingId) {
         const existing = usersById.get(existingId)!;
+        if (existing.disabledAt || existing.deletedAt) existing.sessionVersion += 1;
         existing.globalRole = "admin";
         existing.disabledAt = null;
         existing.updatedAt = now();
@@ -167,7 +190,7 @@ export function createInMemoryStore(): Store {
       const user = usersById.get(args.userId) ?? null;
       if (!user || user.deletedAt) return null;
       user.passwordHash = args.passwordHash;
-      user.sessionVersion = args.nextSessionVersion;
+      user.sessionVersion = Math.max(user.sessionVersion + 1, args.nextSessionVersion);
       user.updatedAt = now();
       return user;
     },
@@ -201,7 +224,7 @@ export function createInMemoryStore(): Store {
         existing.avatarContentType = null;
         existing.avatarPreset = createRandomAvatarPreset();
         existing.globalRole = args.globalRole ?? "user";
-        existing.sessionVersion = 1;
+        existing.sessionVersion += 1;
         existing.disabledAt = null;
         existing.updatedAt = now();
         existing.deletedAt = null;
@@ -243,7 +266,7 @@ export function createInMemoryStore(): Store {
       const user = usersById.get(args.userId) ?? null;
       if (!user || user.deletedAt) return null;
       user.passwordHash = args.passwordHash;
-      user.sessionVersion = args.nextSessionVersion;
+      user.sessionVersion = Math.max(user.sessionVersion + 1, args.nextSessionVersion);
       user.updatedAt = now();
       return user;
     },
@@ -253,6 +276,7 @@ export function createInMemoryStore(): Store {
       if (!user || user.deletedAt) return null;
       user.deletedAt = now();
       user.sessionVersion += 1;
+      for (const token of apiTokens.values()) if (token.userId === user.id && !token.revokedAt) token.revokedAt = now();
       user.updatedAt = now();
       return user;
     },

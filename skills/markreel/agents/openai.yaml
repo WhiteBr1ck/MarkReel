@@ -1,0 +1,4 @@
+interface:
+  display_name: "MarkReel"
+  short_description: "Upload footage and manage timestamped video reviews in MarkReel"
+  default_prompt: "Use $markreel to organize my footage and manage its review annotations."

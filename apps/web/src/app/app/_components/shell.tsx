@@ -68,6 +68,9 @@ export type WorkspaceItem =
       bitrateKbps?: number;
       thumbnailUrl?: string | null;
       status?: string;
+      seriesId?: string | null;
+      versionIndex?: number;
+      versionCount?: number;
     };
 
 export type UploadStage = "preparing" | "signing" | "uploading" | "verifying" | "importing" | "queued" | "transcoding" | "processing" | "ready" | "error" | "cancelled";
@@ -88,6 +91,7 @@ export type UploadItem = {
 };
 
 type Props = {
+  workspaceScroll?: boolean;
   user: ApiUser;
   inspectorOpen: boolean;
   onClearUploads: () => void;
@@ -146,7 +150,7 @@ function PrimaryNav({
 
   function NavButton({ title, onClick, children }: { title: string; onClick: () => void; children: ReactNode }) {
     return (
-      <button className="mr-btn mr-shell__nav-button" onClick={onClick} title={title} aria-label={title} type="button">
+      <button className="mr-btn mr-shell__nav-button mr-tooltip" onClick={onClick} title={title} data-tooltip={title} aria-label={title} type="button">
         {children}
       </button>
     );
@@ -387,12 +391,12 @@ function Topbar({
       <div className="mr-panel mr-shell__topbar-card">
         <div className="mr-shell__topbar-row">
           <div className="mr-shell__title-wrap">
-            <div className="mr-shell__kicker">{labels.shell.topbarKicker}</div>
+            <div className="mr-shell__kicker">MarkReel</div>
             <div className="mr-shell__title">{title}</div>
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <button type="button" onClick={() => setMenuOpen((s) => !s)} className="mr-shell__user-button" title={labels.shell.userAriaLabel}>
+            <button type="button" onClick={() => setMenuOpen((s) => !s)} className="mr-shell__user-button" title={labels.shell.userAriaLabel} aria-expanded={menuOpen}>
               <Avatar name={userName} src={user.avatarUrl} preset={user.avatarPreset} label={labels.shell.userAriaLabel} />
             </button>
           </div>
@@ -431,7 +435,7 @@ export function AppShell(props: Props) {
   const { labels } = useUiPreferences();
 
   return (
-    <div className="mr-shell">
+    <div className={`mr-shell${props.workspaceScroll ? " mr-shell--workspace" : ""}`}>
       <PrimaryNav onGoProjectHome={props.onGoProjectHome} onGoSettings={props.onGoSettings} onGoAbout={props.onGoAbout} />
 
       <main className="mr-shell__main">

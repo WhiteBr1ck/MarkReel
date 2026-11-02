@@ -54,6 +54,12 @@ export type StoreProject = {
 export type Store = {
   kind: "db" | "inmemory";
 
+  apiTokenCreate(args: Omit<StoreApiToken, "id" | "createdAt" | "revokedAt" | "lastUsedAt">): Promise<StoreApiToken>;
+  apiTokenList(userId: string): Promise<StoreApiToken[]>;
+  apiTokenFind(tokenHash: string): Promise<StoreApiToken | null>;
+  apiTokenRevoke(args: { userId: string; tokenId: string }): Promise<boolean>;
+  apiTokenTouch(tokenId: string): Promise<void>;
+
   userFindByUsername(username: string): Promise<StoreUser | null>;
   userFindById(id: string): Promise<StoreUser | null>;
   userCreateOrRevive(args: {
@@ -106,4 +112,18 @@ export type Store = {
   projectGetForUser(args: { userId: string; projectId: string }): Promise<StoreProject | null>;
   projectRenameForUser(args: { userId: string; projectId: string; name: string }): Promise<StoreProject | null>;
   projectDeleteForUser(args: { userId: string; projectId: string }): Promise<StoreProject | null>;
+};
+
+export type StoreApiToken = {
+  id: string;
+  userId: string;
+  name: string;
+  tokenHash: string;
+  prefix: string;
+  readOnly: boolean;
+  sessionVersion: number;
+  createdAt: Date;
+  expiresAt: Date;
+  revokedAt: Date | null;
+  lastUsedAt: Date | null;
 };

@@ -1,0 +1,47 @@
+.mr-player-review-history {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.mr-player-review-status {
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.mr-player-review-fields {
+  display: contents;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.mr-player-page__quick-annotation.mr-player-review-quick {
+  margin: 0;
+  min-width: 0;
+}
+
+.mr-player-review-attachment {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mr-player-review-attachment > .mr-player-page__annotation-image-link {
+  min-width: 0;
+  flex: 1;
+}
+
+.mr-player-page__swatch[aria-pressed="true"] {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+
+.mr-player-page__markup-toolbar[aria-busy="true"] {
+  pointer-events: none;
+  opacity: 0.65;
+}

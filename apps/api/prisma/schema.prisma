@@ -112,6 +112,24 @@ model User {
   shareLinks           ShareLink[]
   projectPermissionGrants ProjectPermissionGrant[]
   mediaPermissionGrants   MediaPermissionGrant[]
+  apiTokens             ApiAccessToken[]
+}
+
+model ApiAccessToken {
+  id             String   @id @default(cuid())
+  userId         String
+  name           String
+  tokenHash      String   @unique
+  prefix         String
+  readOnly       Boolean  @default(false)
+  sessionVersion Int
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  lastUsedAt     DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId, createdAt])
 }
 
 model Organization {
@@ -195,6 +213,7 @@ model MediaSeries {
   title     String
   createdAt DateTime @default(now())
   deletedAt DateTime?
+  nextVersionIndex Int @default(0)
 
   project Project @relation(fields: [projectId], references: [id])
   media    Media[]
@@ -235,6 +254,7 @@ model Media {
   ratings     MediaRating[]
   shareLinks  ShareLink[]
   permissionGrants MediaPermissionGrant[]
+  @@unique([seriesId, versionIndex])
 }
 
 model MediaPermissionGrant {
